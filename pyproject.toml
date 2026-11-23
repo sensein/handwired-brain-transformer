@@ -1,0 +1,26 @@
+[project]
+name = "hwseg"
+version = "0.1.0"
+description = "Weight-space-programmed (no gradient descent) 3D volumetric transformers for multiscale brain segmentation (DANDI 000108)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = ["numpy", "scipy", "torch", "zarr>=2.18,<3", "fsspec", "aiohttp", "requests", "numcodecs"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hwseg"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
