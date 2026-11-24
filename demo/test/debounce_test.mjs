@@ -9,7 +9,7 @@ const srv = http.createServer((q, r) => { const f = path.join(ROOT, q.url.split(
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan,UnsafeWebGPU', '--disable-vulkan-surface', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--headless=new'] });
 const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
-await page.goto(`http://localhost:${PORT}/index.html#id=${ASSET}`);
+await page.goto(`http://localhost:${PORT}/viewer.html#id=${ASSET}`);
 await page.waitForFunction(() => window.__hw && window.__hw.view, null, { timeout: 120000 });
 await page.evaluate(() => { window.__hw.setMaxTiles(2); window.__hw.view.p = 3; window.__hw.schedule(0); });
 await page.waitForFunction(() => window.__hw.counts.started >= 1, null, { timeout: 120000 });

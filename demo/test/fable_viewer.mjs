@@ -9,7 +9,7 @@ const srv = http.createServer((q, r) => { const f = path.join(ROOT, q.url.split(
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan,UnsafeWebGPU', '--disable-vulkan-surface', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--headless=new'] });
 const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
 page.on('pageerror', (e) => console.log('[pageerror]', e.message.slice(0, 200)));
-await page.goto(`http://localhost:${PORT}/index.html#slab=0&id=${ASSET}`);
+await page.goto(`http://localhost:${PORT}/viewer.html#slab=0&id=${ASSET}`);
 await page.waitForFunction(() => window.__hw && window.__hw.view, null, { timeout: 120000 });
 await page.selectOption('#model', MODEL);
 for (const p of (process.env.ZOOMS || '6,3,1.5').split(',').map(Number)) {

@@ -10,7 +10,7 @@ const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '
 const page = await browser.newPage({ viewport: { width: 1500, height: 1000 } });
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
 page.on('console', (m) => { if (m.type() === 'error') console.log('[console.error]', m.text().slice(0, 200)); });
-await page.goto(`http://localhost:${PORT}/index.html#id=${ASSET}`);
+await page.goto(`http://localhost:${PORT}/viewer.html#id=${ASSET}`);
 await page.waitForFunction(() => window.__hw && window.__hw.view, null, { timeout: 180000 });
 await page.click('#bn-toggle');
 const t0 = Date.now(); let st = '';

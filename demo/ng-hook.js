@@ -7,6 +7,34 @@ import { segRegion, adjustLogVol, recommendExposure, IDENT } from './seg.js';
 import { scaledModel, FAMILIES } from './route.js';
 
 const LAYER = 'hwseg detections';
+const axisIdx = (d) => { const k = Object.keys(d); return { x: k.indexOf('x'), y: k.indexOf('y'), z: k.indexOf('z') }; };   // dimension order differs between the zarr state (t,z,y,x) and the virtual volume (x,y,z)
+
+// ---- virtual stitched-slab volume: this page computes the chunks the service worker (sw.js) is asked for
+const slabCache = {};
+const getSlab = (ids, seams) => { const key = ids.join('+') + (seams ? 's' : ''); return (slabCache[key] ||= (async () => { const z = new Slab(ids); await z.init(); if (seams) await z.setSeams(true); return z; })()); };
+async function serveVirtual(idsStr, path) {
+  const seams = idsStr.endsWith('~s'), ids = idsStr.replace(/~s$/, '').split('+'), z = await getSlab(ids, seams);
+  if (path === 'info') {
+    const scales = z.levels.map((L, l) => ({ key: String(l), size: [L.shape[2], L.shape[1], L.shape[0]], resolution: [L.sp[2] * 1000, L.sp[1] * 1000, L.sp[0] * 1000], chunk_sizes: [[128, 128, 32]], encoding: 'raw', voxel_offset: [0, 0, 0] }));
+    return { type: 'application/json', body: new TextEncoder().encode(JSON.stringify({ '@type': 'neuroglancer_multiscale_volume', type: 'image', data_type: 'uint16', num_channels: 1, scales })).buffer };
+  }
+  const m = path.match(/^(\d+)\/(\d+)-(\d+)_(\d+)-(\d+)_(\d+)-(\d+)$/); if (!m) return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) };
+  const [l, x0, x1, y0, y1, z0, z1] = m.slice(1).map(Number), L = z.levels[l], X1 = Math.min(x1, L.shape[2]), Y1 = Math.min(y1, L.shape[1]), Z1 = Math.min(z1, L.shape[0]);
+  const v = await z.crop(l, z0, Z1, y0, Y1, x0, X1), out = new Uint16Array(v.length);          // log(I+1) -> uint16 counts; (z,y,x) C-order = Fortran (x fastest)
+  for (let i = 0; i < v.length; i++) out[i] = Math.max(0, Math.min(65535, Math.round(Math.exp(v[i]) - 1)));
+  return { type: 'application/octet-stream', body: out.buffer };
+}
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', async (ev) => {
+    const m = ev.data; if (!m || m.kind !== 'virtual') return; const port = ev.ports[0];
+    try { const r = await serveVirtual(m.ids, m.path); port.postMessage(r, [r.body]); }
+    catch (e) { port.postMessage({ status: 500, type: 'text/plain', body: new TextEncoder().encode(String(e)).buffer }); }
+  });
+  navigator.serviceWorker.register(new URL('sw.js', import.meta.url).href).then(async () => {
+    await navigator.serviceWorker.ready;   // a shared link opened directly: the first load is not controlled yet, so reload once
+    if (!navigator.serviceWorker.controller && /virtual\/slab/.test(location.href) && !sessionStorage.getItem('hw-sw-reload')) { sessionStorage.setItem('hw-sw-reload', '1'); location.reload(); }
+  }).catch(() => {});
+}
 const el = (t, css, html) => { const e = document.createElement(t); if (css) e.style.cssText = css; if (html) e.innerHTML = html; return e; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 while (!window.viewer) await sleep(100);
@@ -15,9 +43,10 @@ const viewer = window.viewer;
 // ---- small UI
 const box = el('div', 'position:fixed;left:8px;bottom:8px;z-index:9999;background:rgba(20,21,26,.92);color:#e8e8e4;font:12px/1.4 system-ui;padding:8px 10px;border:1px solid #444;border-radius:8px;max-width:340px');
 box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="regions">tissue outline + cortex / white-matter boundary (contours)</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
-document.body.append(box);
-const say = (t) => { document.getElementById('hw-s').textContent = t; window.__hwNg.status = t; };
-window.__hwNg = { status: '', runs: 0 };
+const EMBEDDED = new URLSearchParams(location.search).has('embedded');    // the shell page drives us through window.__hwNg
+document.body.append(box); if (EMBEDDED) box.style.display = 'none';
+window.__hwNg = { status: '', runs: 0, busy: false, events: [], last: null };
+const say = (t) => { document.getElementById('hw-s').textContent = t; window.__hwNg.status = t; window.__hwNg.events.push({ t: Date.now(), msg: t }); if (window.__hwNg.events.length > 200) window.__hwNg.events.shift(); };
 
 let engine = null; try { engine = await GPUEngine.create(); } catch (e) { say('no WebGPU: detection unavailable'); }
 const HERE = (p) => new URL(p, import.meta.url).href;                     // the page is /ng/index.html; models live next to this module
@@ -36,15 +65,18 @@ async function probeFov() {
 }
 function imageSource(j) {
   const L = (j.layers || []).find((l) => l.type === 'image'); if (!L) throw new Error('no image layer');
-  const txt = JSON.stringify(L.source); const ids = [...new Set([...txt.matchAll(/dandiarchive\.s3\.amazonaws\.com\/zarr\/([0-9a-f-]{36})/g)].map((m) => m[1]))];
-  if (!ids.length) throw new Error('image layer is not a DANDI zarr source'); return ids;
+  const txt = JSON.stringify(L.source), v = txt.match(/virtual\/slab\/([0-9a-f+-]+)(~s)?/);
+  if (v) return { ids: v[1].split('+'), virtual: true, seams: !!v[2] };
+  const ids = [...new Set([...txt.matchAll(/dandiarchive\.s3\.amazonaws\.com\/zarr\/([0-9a-f-]{36})/g)].map((m) => m[1]))];
+  if (!ids.length) throw new Error('image layer is not a DANDI zarr source'); return { ids, virtual: false, seams: false };
 }
-async function openSource(ids) {
-  const key = ids.join('+'); if (sources[key]) return sources[key];
-  say(`opening ${ids.length > 1 ? `stitched slab (${ids.length} strips)` : 'strip'}...`);
-  const z = ids.length > 1 ? new Slab(ids) : new Zarr(ids[0]); await z.init();
-  // Neuroglancer places each zarr at its OME translation: global voxel = local index + translation / voxel size
-  const L0 = z.levels[0], off = ids.length > 1 ? L0.origin : L0.tr; z.__off = [0, 1, 2].map((a) => off[a] / L0.sp[a]); return (sources[key] = z);
+async function openSource({ ids, virtual, seams }) {
+  say(`opening ${ids.length > 1 || virtual ? `stitched slab (${ids.length} strips)` : 'strip'}...`);
+  const z = virtual ? await getSlab(ids, seams) : (ids.length > 1 ? await getSlab(ids, false) : (sources[ids[0]] ||= await (async () => { const q = new Zarr(ids[0]); await q.init(); return q; })()));
+  // zarr sources: Neuroglancer places each zarr at its OME translation (global voxel = local index + translation / voxel size);
+  // the virtual volume's own grid starts at 0.
+  const L0 = z.levels[0], off = virtual ? [0, 0, 0] : (ids.length > 1 ? L0.origin : L0.tr).map((o, a) => o / L0.sp[a]);
+  return Object.assign(Object.create(null), { z, off });
 }
 
 // ---- 2-D connected components on the segmentation plane -> ellipsoid annotations
@@ -74,8 +106,8 @@ function contourSegments(mask, w, h) {
 }
 async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   const keys = Object.keys(d), pos = j.position || [];
-  const m0 = scaledModel('fable_tissue', umPerPx, zarr), progT = await getProgram('fable_tissue'), progC = await getProgram('fable_cortex_wm');
-  const gx = [fov.tl[3], fov.br[3]].sort((a, b) => a - b), gy = [fov.tl[2], fov.br[2]].sort((a, b) => a - b), lz = fov.c[1] - off[0];
+  const m0 = scaledModel('fable_cortex_wm', umPerPx, zarr), progT = await getProgram('fable_tissue'), progC = await getProgram('fable_cortex_wm');
+  const A = axisIdx(d), gx = [fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b), gy = [fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b), lz = fov.c[A.z] - off[0];
   const dmax = Math.max(progT.d, progC.d); let level = m0.level, box_;
   for (;;) {                                                                       // coarsen until the whole FOV fits one pass
     const f = 2 ** level, L = zarr.levels[level], hz = Math.max(haloFor(progT, L.sp)[0], haloFor(progC, L.sp)[0]);
@@ -111,13 +143,14 @@ async function detect() {
   if (!engine) return; window.__hwNg.runs++;
   const j = viewer.state.toJSON(), disp = j.displayDimensions, fov = await probeFov();
   const d = j.dimensions || {}, sp0 = { z: d.z && d.z[0], y: d.y && d.y[0], x: d.x && d.x[0] }; if (!sp0.x) throw new Error('state has no x/y/z dimensions');
-  const zarr = await openSource(imageSource(j)), off = zarr.__off, L0 = zarr.levels[0];
-  const gx = [fov.tl[3], fov.br[3]].sort((a, b) => a - b), gy = [fov.tl[2], fov.br[2]].sort((a, b) => a - b), gz = fov.c[1];
+  const src = await openSource(imageSource(j)), zarr = src.z, off = src.off, L0 = zarr.levels[0], A = axisIdx(d);
+  const gx = [fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b), gy = [fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b), gz = fov.c[A.z];
   if (!(gx[1] - gx[0] > 1 && gy[1] - gy[0] > 1)) throw new Error('show the x-y plane (displayDimensions x, y, z and layout xy)');
   // level-0 local voxel box of the FOV
   const lx = [gx[0] - off[2], gx[1] - off[2]], ly = [gy[0] - off[1], gy[1] - off[1]], lz = gz - off[0];
   const umPerPx = ((gx[1] - gx[0]) * L0.sp[2]) / fov.w;                       // physical size of a screen pixel
   if ($('hw-m').value === 'regions') return detectRegions(j, fov, zarr, off, d, umPerPx, sp0);
+  if (umPerPx > 16) { say(`zoom in first: cells and vessels need a field of view of a few mm (this view is ${umPerPx.toFixed(0)} um/px)`); return; }
   const family = $('hw-m').value, m = scaledModel(family, umPerPx, zarr), prog = await getProgram(m.model), f = 2 ** m.level, L = zarr.levels[m.level];
   const box_ = [clamp(Math.floor(ly[0] / f), 0, L.shape[1] - 1), clamp(Math.ceil(ly[1] / f), 1, L.shape[1]), clamp(Math.floor(lx[0] / f), 0, L.shape[2] - 1), clamp(Math.ceil(lx[1] / f), 1, L.shape[2])];
   const cap = 384, cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;                 // keep one pass within device memory: centre crop
@@ -148,9 +181,11 @@ async function detect() {
 const $ = (id) => document.getElementById(id);
 const viewKey = () => { const j = viewer.state.toJSON(); return JSON.stringify([j.position, j.crossSectionScale, j.layout, (j.layers || []).filter((l) => l.name !== LAYER).map((l) => l.name)]); };
 let lastView = viewKey(), timer = null, busy = Promise.resolve();
-const run = () => { busy = busy.then(() => detect()).catch((e) => say('error: ' + e.message)); return busy; };
+const run = () => { window.__hwNg.busy = true; busy = busy.then(() => detect()).catch((e) => say('error: ' + e.message)).finally(() => { window.__hwNg.busy = false; }); return busy; };
 $('hw-run').onclick = run;
 viewer.state.changed.add(() => {                                              // debounced: only after the view settles, and never for our own annotation write
   if (!$('hw-auto').checked || viewKey() === lastView) return; lastView = viewKey(); clearTimeout(timer); say('view changed: detecting after it settles...'); timer = setTimeout(run, 600);
 });
-window.__hwNg.run = run; say('ready');
+window.__hwNg.run = run; window.__hwNg.runModel = (key) => { $('hw-m').value = key; return run(); };
+window.__hwNg.setAuto = (on, key) => { if (key) $('hw-m').value = key; $('hw-auto').checked = !!on; if (on) run(); };
+window.__hwNg.ready = true; say('ready');

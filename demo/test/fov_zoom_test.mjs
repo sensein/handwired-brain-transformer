@@ -11,7 +11,7 @@ const srv = http.createServer((q, r) => { const f = path.join(ROOT, q.url.split(
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan,UnsafeWebGPU', '--disable-vulkan-surface', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--headless=new'] });
 const page = await browser.newPage({ viewport: { width: VW, height: VH } });
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
-await page.goto(`http://localhost:${PORT}/index.html#id=${ASSET}`);
+await page.goto(`http://localhost:${PORT}/viewer.html#id=${ASSET}`);
 await page.waitForFunction(() => window.__hw && window.__hw.view, null, { timeout: 120000 });
 await page.evaluate(() => window.__hw.setMaxTiles(2));
 const canvasPx = await page.evaluate(() => [document.getElementById('cv').width, document.getElementById('cv').height]);

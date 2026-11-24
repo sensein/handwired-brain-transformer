@@ -14,8 +14,8 @@ export const FAMILIES = {
   // round 2: cheap fine-scale programs (levels 0-1 only; every scale is gated off from level 2 up), default for zoomed-in views
   // hand-written region maps (hard classes), validated at pyramid levels 4-6; planar windows up to 3.84 mm
   fable_tissue: { kind: 'tissue2', invariant: true, minLevel: 4 },
-  fable_cortex_wm: { kind: 'cortex_wm', invariant: true, minLevel: 4 },
-  fable_layers: { kind: 'layers2', invariant: true, minLevel: 4 },
+  fable_cortex_wm: { kind: 'cortex_wm', invariant: true, minLevel: 5 },   // NOT scale-invariant: same 12x8 mm FOV gives wm 36-41% at L5, 12-16% at L4, 0% at L3 (scripts/regions_levels.py)
+  fable_layers: { kind: 'layers2', invariant: true, minLevel: 5 },
   fable_blobs_v2: { kind: 'blobs', invariant: true, fineOnly: true, maxLevel: 1 },
   fable_vessels_v2: { kind: 'vessels_ms', invariant: true, fineOnly: true, maxLevel: 1 },
 };

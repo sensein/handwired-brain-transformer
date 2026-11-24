@@ -172,20 +172,30 @@ rings around dark structures inside white matter (lateral ventricle, holes, tear
 visible dark line, and cortex whose pia is outside the field of view, are missed; the thin-line detector is the fragile part
 (depends on level and contrast); out-of-plane haze at level 6 turns into tissue at contrast >= 2 on one slab. These programs
 are only meaningful for the NN and YO stains (on LEC they return nothing or a full rectangle), so the router skips them for LEC.
-Not tested: levels 0-3, LEC, and no real-data accuracy numbers exist (no labels).
+Levels: tested at 5 and 6 by the agent; I read the same 12 x 8 mm field of view at levels 3, 4 and 5 (`scripts/regions_levels.py`): tissue is consistent (NN 100%, YO 95% at all three), but cortex vs white matter is **not scale-invariant** (white matter 36-41% at level 5, 12-16% at level 4, 0% at level 3 on NN and YO), so cortex/WM and the layer bands are restricted to level 5 and above. Levels 0-2 would need tens of millions of tokens for the 10 mm+ field of view these programs require, so they were not run; LEC is not applicable; no real-data accuracy numbers exist (no labels).
 
 ## Streaming, no bulk download
 
 `hwseg.data.StreamedZarr` and the demo read only the zarr chunks a crop intersects (HTTP GET per chunk from the
 DANDI S3 bucket) and decode them; an optional disk cache is hard-capped. Nothing downloads whole volumes.
 
-## Demo: WebGPU viewer and slab gallery
+## Demo: Neuroglancer with weight-programmed models
 
-Live: https://sensein.group/handwired-brain-transformer/ (GitHub Pages, branch `gh-pages`; redeploy with
-`scripts/deploy_pages.sh`). If the custom domain is unavailable use
-https://sensein.github.io/handwired-brain-transformer/.
+Live: https://sensein.github.io/handwired-brain-transformer/ (GitHub Pages, branch `gh-pages`; redeploy with
+`NG_DIST=<built neuroglancer dist> scripts/deploy_pages.sh`).
 
-* **Viewer** (`index.html`): pick a slab, pan / zoom; models, scale and pyramid level follow the zoom.
+The front page (`index.html`) is a Neuroglancer view embedded in a thin shell: a sidebar selects stain, sample, acquisition,
+whole slab vs one strip, and the model; Neuroglancer's own shader panel gives lo / hi / contrast / brightness / gamma.
+"Run on this view" streams the chunks of the current field of view, runs the model on your GPU (WebGPU) and adds the result as
+Neuroglancer annotation layers (cells, vessels, tissue outline, cortex/white-matter boundary). The whole slab is a *virtual
+precomputed volume* generated in the browser by our stitcher and served to Neuroglancer by a service worker (`sw.js`), so
+adjacent strips are cross-faded into one continuous volume. The old stand-alone 2D viewer remains at `viewer.html` (legacy;
+it documents the debounced FOV pipeline, depth keys and 3D renderer below); the slab gallery was removed.
+Cortex / white-matter and layer programs are only routed at pyramid level >= 5 (coarse): the cortex boundary is a fixed
+distance from the pia and is not scale-invariant. Levels 0-2 need a field of view above ~10 mm, larger than a GPU buffer, so
+region programs are not tested there.
+
+* **Legacy viewer** (`viewer.html`): pick a slab, pan / zoom; models, scale and pyramid level follow the zoom.
   * *Whole stitched slabs, not just strips*: a slab acquisition is 8–11 strips stacked along y (each ~7.4 mm tall, up to
     127 mm long, ~0.8 mm overlap, z and x origins drifting by up to ~0.5 mm). The viewer stitches them from the physical
     translation stored in each zarr (what Neuroglancer does with a multi-source layer), blending overlaps with a feathered
@@ -213,12 +223,7 @@ https://sensein.github.io/handwired-brain-transformer/.
   * *3D*: a WebGL2 ray-marcher (MIP, composite with early termination, isosurface; rotate / zoom; threshold, gain,
     quality) renders the current field of view and depth slab from an 8-bit 3D texture, optionally overlaying the
     segmentation computed for the whole volume (WebGPU engine returns every plane of the slab).
-* **Slab gallery** (`slabs.html`): one column per slab, one row per stain (YO / NN / LEC), a pyramid-level selector
-  that drives the model choice, the same exposure controls, per-cell stats (class fractions, cells/mm² in the plane,
-  vessel area) and a CSV export. Each cell streams a window at the brightest tissue location of that slab and links
-  into the viewer (`index.html#id=...&p=...`).
-
-Zoom routing (µm per screen pixel `p`): `p ≥ 8.5` tissue; `p < 8.5` cells (YO/NN/other stains) or vessels
+Zoom routing (µm per screen pixel `p`): `p ≥ 8.5` tissue (`fable_tissue`); `p < 8.5` cells (YO/NN/other stains) or vessels
 (LEC/CD31); layers only by explicit choice; the scale family and pyramid level are then chosen from `p` (`demo/route.js`).
 
 ```bash

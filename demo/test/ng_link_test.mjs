@@ -9,7 +9,7 @@ const srv = http.createServer((q, r) => { let f = path.join(ROOT, q.url.split('?
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--enable-unsafe-webgpu', '--enable-features=Vulkan,UnsafeWebGPU', '--disable-vulkan-surface', '--use-vulkan=swiftshader', '--use-webgpu-adapter=swiftshader', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--headless=new'] });
 const ctx = await browser.newContext({ viewport: { width: 1300, height: 850 } });
 const page = await ctx.newPage(); page.on('pageerror', (e) => console.log('[pageerror]', e.message.slice(0, 200)));
-await page.goto(`http://localhost:${PORT}/index.html#id=${ASSET}`);
+await page.goto(`http://localhost:${PORT}/viewer.html#id=${ASSET}`);
 await page.waitForFunction(() => window.__hw && window.__hw.view && window.__hw.zarr, null, { timeout: 180000 });
 await page.waitForTimeout(25000);                      // overview + exposure
 await page.screenshot({ path: `${OUT}/link_viewer.png` });
