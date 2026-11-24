@@ -19,7 +19,7 @@ await page.waitForTimeout(8000);
 await page.screenshot({ path: `${OUT}/ng_before.png` });
 await page.selectOption('#hw-m', process.env.MODEL || 'cells'); await page.click('#hw-run');
 const t0 = Date.now(); let st = '';
-while (Date.now() - t0 < 240000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/detections|segments|detections|error/.test(st)) break; }
+while (Date.now() - t0 < 720000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/detections|segments|detections|error/.test(st)) break; }
 console.log('status:', st, `(${((Date.now() - t0) / 1000).toFixed(0)} s)`);
 const res = await page.evaluate(() => { const j = window.viewer.state.toJSON(), l = (j.layers || []).find((x) => x.name === 'hwseg detections'); const img = j.layers.find((x) => x.type === 'image'); return { shaderControls: img && img.shaderControls, position: j.position, scale: j.crossSectionScale, last: window.__hwNg.last, layers: j.layers.map((x) => x.name + ':' + x.type + (x.annotations ? '(' + x.annotations.length + ')' : '')), displayDimensions: j.displayDimensions, first: l && l.annotations && l.annotations[0] }; });
 console.log(JSON.stringify(res));

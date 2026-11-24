@@ -186,7 +186,7 @@ Live: https://sensein.github.io/handwired-brain-transformer/ (GitHub Pages, bran
 
 The front page (`index.html`) is a Neuroglancer view embedded in a thin shell: a sidebar selects stain, sample, acquisition,
 whole slab vs one strip, and the model; Neuroglancer's own shader panel gives lo / hi / contrast / brightness / gamma.
-"Run on this view" streams the chunks of the current field of view, runs the model on your GPU (WebGPU) and adds the result as
+"Run on this view" streams the chunks of the current field of view (tiled into overlapping 384-voxel GPU passes, up to 100 tiles, centre first, so the whole view is covered), runs the model on your GPU (WebGPU) and adds the result as
 Neuroglancer annotation layers (cells, vessels, tissue outline, cortex/white-matter boundary). The whole slab is a *virtual
 precomputed volume* generated in the browser by our stitcher and served to Neuroglancer by a service worker (`sw.js`), so
 adjacent strips are cross-faded into one continuous volume. The old stand-alone 2D viewer remains at `viewer.html` (legacy;

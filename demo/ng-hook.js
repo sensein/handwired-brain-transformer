@@ -153,14 +153,23 @@ async function detect() {
   if (umPerPx > 16) { say(`zoom in first: cells and vessels need a field of view of a few mm (this view is ${umPerPx.toFixed(0)} um/px)`); return; }
   const family = $('hw-m').value, m = scaledModel(family, umPerPx, zarr), prog = await getProgram(m.model), f = 2 ** m.level, L = zarr.levels[m.level];
   const box_ = [clamp(Math.floor(ly[0] / f), 0, L.shape[1] - 1), clamp(Math.ceil(ly[1] / f), 1, L.shape[1]), clamp(Math.floor(lx[0] / f), 0, L.shape[2] - 1), clamp(Math.ceil(lx[1] / f), 1, L.shape[2])];
-  const cap = 384, cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;                 // keep one pass within device memory: centre crop
-  const y0 = Math.max(0, cy - Math.min(cap >> 1, (box_[1] - box_[0]) >> 1)), y1 = Math.min(L.shape[1], cy + Math.min(cap >> 1, (box_[1] - box_[0]) >> 1)), x0 = Math.max(0, cx - Math.min(cap >> 1, (box_[3] - box_[2]) >> 1)), x1 = Math.min(L.shape[2], cx + Math.min(cap >> 1, (box_[3] - box_[2]) >> 1));
-  const zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
-  say(`${m.model} on ${x1 - x0}x${y1 - y0} voxels at level ${m.level}: streaming...`);
-  const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, y0, y1, x0, x1);
-  say(`${m.model}: running on WebGPU...`);
-  const r = await segRegion(zarr, engine, prog, m.level, zl, y0, y1, x0, x1, (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma }), { halo: false });
-  const comps = components(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h), sL = L.sp, R = (c) => c.r * sL[2];
+  const cap = 384, core = 320, hal = (cap - core) >> 1, zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
+  const cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;
+  const cy0 = Math.max(0, cy - (cap >> 1)), cy1 = Math.min(L.shape[1], cy + (cap >> 1)), cx0 = Math.max(0, cx - (cap >> 1)), cx1 = Math.min(L.shape[2], cx + (cap >> 1));
+  say(`${m.model}: streaming exposure window...`);
+  const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, cy0, cy1, cx0, cx1);
+  // the whole field of view is covered by overlapping tiles (core + halo, one GPU pass each); a detection belongs to the tile whose core holds its centre
+  const tiles = []; for (let ty = box_[0]; ty < box_[1]; ty += core) for (let tx = box_[2]; tx < box_[3]; tx += core) tiles.push([ty, Math.min(ty + core, box_[1]), tx, Math.min(tx + core, box_[3])]);
+  tiles.sort((p, q) => Math.hypot((p[0] + p[1]) / 2 - cy, (p[2] + p[3]) / 2 - cx) - Math.hypot((q[0] + q[1]) / 2 - cy, (q[2] + q[3]) / 2 - cx));   // centre first
+  const MAXT = 100, use = tiles.slice(0, MAXT); let sL = L.sp, R = (c) => c.r * sL[2], comps = [], y0 = box_[0], x0 = box_[2], y1 = box_[1], x1 = box_[3];
+  for (let ti = 0; ti < use.length; ti++) {
+    const [cy_0, cy_1, cx_0, cx_1] = use[ti], Y0 = Math.max(0, cy_0 - hal), Y1 = Math.min(L.shape[1], cy_1 + hal), X0 = Math.max(0, cx_0 - hal), X1 = Math.min(L.shape[2], cx_1 + hal);
+    say(`${m.model}: tile ${ti + 1}/${use.length} (${X1 - X0}x${Y1 - Y0} voxels, level ${m.level}) on WebGPU...`);
+    const r = await segRegion(zarr, engine, prog, m.level, zl, Y0, Y1, X0, X1, (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma }), { halo: false });
+    for (const c of components(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h)) { const gy_ = Y0 + c.y, gx_ = X0 + c.x; if (gy_ >= cy_0 && gy_ < cy_1 && gx_ >= cx_0 && gx_ < cx_1) comps.push({ ...c, y: gy_ - 0, x: gx_ - 0 }); }
+  }
+  y0 = 0; x0 = 0; y1 = box_[1]; x1 = box_[3];           // detections are already in level-local voxel coordinates
+  if (tiles.length > use.length) say(`field of view needs ${tiles.length} tiles; the ${use.length} nearest the centre were run - zoom in for full coverage`);
   // voxel (level m.level, local) -> Neuroglancer global voxel (level 0 + translation)
   // Annotation space = the viewer's own dimensions in the same order (t, z, y, x): any other space reorders the global
   // dimensions and resets the view. Dimensions we do not segment (t) take the current position and radius 1.
