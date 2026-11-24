@@ -5,10 +5,28 @@ export function toCanvas(arr, w, h, f) { const c = document.createElement('canva
 
 // Segment the in-plane region [y0,y1)x[x0,x1) of plane zl at pyramid `level` (with the program's attention halo).
 // Returns the model output planes plus the raw log-intensity plane, all indexed on the padded crop (use ox/oy).
-export async function segRegion(zarr, engine, prog, level, zl, y0, y1, x0, x1) {
-  const L = zarr.levels[level], sp = L.sp, [hz, hy, hx] = haloFor(prog, sp);
+// Brightness / contrast / gamma on log-intensity normalized to a display window [lo, hi]:
+//   u = clamp((v-lo)/(hi-lo)); u' = clamp((u-0.5)*contrast + 0.5 + brightness)^gamma
+export const IDENT = { b: 0, c: 1, g: 1 };
+export const isIdent = (a) => a.b === 0 && a.c === 1 && a.g === 1;
+export function adjustU(u, a) { u = (u - 0.5) * a.c + 0.5 + a.b; u = u < 0 ? 0 : u > 1 ? 1 : u; return a.g === 1 ? u : Math.pow(u, a.g); }
+// Model input = the display image u' in [0,1] (what the viewer shows): window -> contrast/brightness -> gamma.
+export function adjustLogVol(vol, lo, hi, a) {
+  const out = new Float32Array(vol.length), r = Math.max(hi - lo, 1e-6);
+  for (let i = 0; i < vol.length; i++) { const u = (vol[i] - lo) / r; out[i] = adjustU(u < 0 ? 0 : u > 1 ? 1 : u, a); }
+  return out;
+}
+export const percentileWindow = (v, p0 = 0.02, p1 = 0.997) => { const s = Float32Array.from(v).sort(); const lo = s[Math.floor(s.length * p0)], hi = s[Math.floor(s.length * p1)]; return [lo, Math.max(hi, lo + 1)]; };
+
+// opts.halo=false: the model sees only the requested in-plane region (view-dependent: in-context statistics and
+// attention are computed over the field of view and nothing outside it); depth context (z slab) is still included.
+export async function segRegion(zarr, engine, prog, level, zl, y0, y1, x0, x1, adjustFn = null, opts = {}) {
+  const L = zarr.levels[level], sp = L.sp; let [hz, hy, hx] = haloFor(prog, sp);
+  if (opts.halo === false) { hy = 0; hx = 0; }
   const zs = Math.max(0, zl - hz), ze = Math.min(L.shape[0], zl + hz + 1), ys = Math.max(0, y0 - hy), ye = Math.min(L.shape[1], y1 + hy), xs = Math.max(0, x0 - hx), xe = Math.min(L.shape[2], x1 + hx);
-  const vol = await zarr.crop(level, zs, ze, ys, ye, xs, xe), dims = [ze - zs, ye - ys, xe - xs], zc = zl - zs, pl = dims[1] * dims[2];
+  let vol = await zarr.crop(level, zs, ze, ys, ye, xs, xe);
+  if (adjustFn) vol = adjustFn(vol);
+  const dims = [ze - zs, ye - ys, xe - xs], zc = zl - zs, pl = dims[1] * dims[2];
   let out;
   if (engine) out = await engine.run(prog, vol, dims, sp, zc);
   else {
@@ -53,4 +71,47 @@ export function regionStats(kind, r, sp) {
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue; const k = yy * w + xx; if (mask[k] && !seen[k]) { seen[k] = 1; st.push(k); } } }
   }
   return { cells_per_mm2: cc / areaMm2, area_frac: on / n };
+}
+
+// Segment every plane of [z0,z1) over the region (view-dependent: halo=false means in-plane context is the FOV only).
+export async function segVolume(zarr, engine, prog, level, z0, z1, y0, y1, x0, x1, adjustFn = null, opts = {}) {
+  const L = zarr.levels[level], sp = L.sp; let [hz, hy, hx] = haloFor(prog, sp);
+  if (opts.halo === false) { hy = 0; hx = 0; }
+  const zs = Math.max(0, z0 - hz), ze = Math.min(L.shape[0], z1 + hz), ys = Math.max(0, y0 - hy), ye = Math.min(L.shape[1], y1 + hy), xs = Math.max(0, x0 - hx), xe = Math.min(L.shape[2], x1 + hx);
+  let vol = await zarr.crop(level, zs, ze, ys, ye, xs, xe);
+  if (adjustFn) vol = adjustFn(vol);
+  const dims = [ze - zs, ye - ys, xe - xs], plane = dims[1] * dims[2], zc = z0 - zs, zhi = z1 - 1 - zs;
+  let out;
+  if (engine) out = await engine.run(prog, vol, dims, sp, zc, { zhi });
+  else { const o = runCPU(prog, vol, dims, sp); out = {}; for (const k in o) out[k] = o[k].subarray(zc * plane, (zhi + 1) * plane); }
+  return { out, dims, ox: x0 - xs, oy: y0 - ys, w: x1 - x0, h: y1 - y0, nz: z1 - z0, plane };
+}
+
+// Uint8 label volume (z,y,x): 0 = nothing, k>0 = class k (tissue/layers: bg is 0) or 1 for binary segmentations.
+export function labelVolume(kind, r) {
+  const { out, dims, ox, oy, w, h, nz, plane } = r, lab = new Uint8Array(nz * h * w), names = CLASSES[kind];
+  for (let z = 0; z < nz; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = z * plane + (oy + y) * dims[2] + ox + x, o = (z * h + y) * w + x;
+    if (names) { let b = 0, bv = -Infinity; for (let k = 0; k < names.length; k++) { const v = out[names[k]][i]; if (v > bv) { bv = v; b = k; } } lab[o] = b; }
+    else lab[o] = out.seg[i] > 0.5 ? 1 : 0;
+  }
+  return lab;
+}
+export function paletteFor(kind) {
+  if (CLASSES[kind]) return CLASSES[kind].map((n, k) => (k === 0 ? [0, 0, 0] : COLORS[n]));
+  return [[0, 0, 0], kind === 'vessels' ? [40, 220, 255] : [255, 60, 200]];
+}
+
+// Model-recommended default exposure for a field of view: runs the `exposure` program (global heads over the FOV slab)
+// and returns the display window [lo, hi] (log domain) and a gamma that maps the FOV mean to ~0.4 of the display range.
+export async function recommendExposure(zarr, engine, prog, level, zl, y0, y1, x0, x1) {
+  const L = zarr.levels[level], sp = L.sp, z0 = Math.max(0, zl - 6), z1 = Math.min(L.shape[0], zl + 7);
+  const cap = 384, cy = (y0 + y1) >> 1, cx = (x0 + x1) >> 1, hy = Math.min((y1 - y0) >> 1, cap >> 1), hx = Math.min((x1 - x0) >> 1, cap >> 1);
+  const vy0 = Math.max(0, cy - hy), vy1 = Math.min(L.shape[1], cy + hy + 1), vx0 = Math.max(0, cx - hx), vx1 = Math.min(L.shape[2], cx + hx + 1);
+  const vol = await zarr.crop(level, z0, z1, vy0, vy1, vx0, vx1), dims = [z1 - z0, vy1 - vy0, vx1 - vx0], zc = zl - z0, pl = dims[1] * dims[2];
+  let o;
+  if (engine) o = await engine.run(prog, vol, dims, sp, zc);
+  else { const r = runCPU(prog, vol, dims, sp); o = {}; for (const k in r) o[k] = r[k].subarray(zc * pl, (zc + 1) * pl); }
+  const lo = o.lo[0], hi = Math.max(o.hi[0], o.lo[0] + 0.5), mean = o.mean[0], um = clamp((mean - lo) / (hi - lo), 0.05, 0.95);
+  return { lo, hi, mean, gamma: clamp(Math.log(0.4) / Math.log(um), 0.4, 2.5) };
 }

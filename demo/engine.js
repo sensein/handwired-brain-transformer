@@ -46,9 +46,9 @@ export function haloFor(prog, sp) {
   return [hz, hy, hx];
 }
 
-export function planRanges(prog, sp, Z, zc) {
+export function planRanges(prog, sp, Z, zc, zhi = zc) {
   const n = prog.layers.length, ranges = new Array(n), inRanges = new Array(n);
-  let lo = zc, hi = zc;
+  let lo = zc, hi = zhi;
   for (let l = n - 1; l >= 0; l--) {
     ranges[l] = [lo, hi];
     const rv = prog.layers[l].heads.map((h) => radiusVox(h, sp));
@@ -85,7 +85,7 @@ export function runCPU(prog, logI, dims, sp) {
           if (wq !== 0) for (let i = 0; i < N; i++) q[a * N + i] += wq * x[c * N + i];
           if (wk !== 0) for (let i = 0; i < N; i++) k[a * N + i] += wk * x[c * N + i];
         }
-        const r = radiusVox(h, sp);
+        const r = radiusVox(h, sp).map((v, i) => Math.min(v, Math.max(1, [Z, Y, X][i] - 1)));
         for (let z = 0; z < Z; z++) for (let y = 0; y < Y; y++) for (let xx = 0; xx < X; xx++) {
           const i = (z * Y + y) * X + xx;
           let m = -Infinity, s = 0, acc = 0;
@@ -213,7 +213,7 @@ var<workgroup> sh: array<f32, 256>;
   let t = tok(g); if (t >= p.N) { return; }
   let z = t / (p.Y * p.X); if (z < p.olo || z > p.ohi) { return; }
   let d = p.d; let N = p.N; let h = p.h;
-  var xv: array<f32, 64>; var dl: array<f32, 64>;
+  var xv: array<f32, 96>; var dl: array<f32, 96>;
   for (var c = 0u; c < d; c++) { xv[c] = x[c * N + t]; dl[c] = 0.0; }
   for (var i = 0u; i < h; i++) {
     var pre = w[h * d + i];
@@ -278,11 +278,11 @@ export class GPUEngine {
   }
 
   // Run a tile; returns {name: Float32Array(Y*X)} for plane zc of every named output.
-  async run(prog, logI, dims, sp, zc) {
+  async run(prog, logI, dims, sp, zc, opts = {}) {
     const dev = this.device, [Z, Y, X] = dims, N = Z * Y * X, d = prog.d;
-    if (d > 64) throw new Error('d>64 unsupported');
+    if (d > 96) throw new Error("d>96 unsupported");
     if (N > this.maxTokens(d)) throw new Error('tile too large for device buffer limits');
-    const W = this._weights(prog), { ranges, inRanges } = planRanges(prog, sp, Z, zc);
+    const zhi = opts.zhi ?? zc, W = this._weights(prog), { ranges, inRanges } = planRanges(prog, sp, Z, zc, zhi);
     const U = GPUBufferUsage;
     const bx = dev.createBuffer({ size: 4 * d * N, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
     const bq = dev.createBuffer({ size: 16 * N, usage: U.STORAGE });
@@ -314,7 +314,7 @@ export class GPUEngine {
     prog.layers.forEach((L, li) => {
       const [olo, ohi] = ranges[li], [ilo, ihi] = inRanges[li];
       L.heads.forEach((h, hi) => {
-        const r = radiusVox(h, sp);
+        const r0 = radiusVox(h, sp), r = r0 && r0.map((v, i) => Math.min(v, Math.max(1, dims[i] - 1)));
         if (r) {
           dispatch('qkv', W[li].heads[hi], { ilo, ihi, olo, ohi });
           dispatch('attn', W[li].heads[hi], { rz: r[0], ry: r[1], rx: r[2], olo, ohi, ilo, ihi });
@@ -327,16 +327,16 @@ export class GPUEngine {
       });
       if (L.mlp) dispatch('mlp', W[li].mlp, { h: L.mlp.h, olo, ohi, ilo, ihi });
     });
-    const names = Object.keys(prog.out), plane = Y * X;
-    const stage = dev.createBuffer({ size: 4 * plane * names.length, usage: U.MAP_READ | U.COPY_DST });
-    names.forEach((n, i) => enc.copyBufferToBuffer(bx, 4 * (prog.out[n] * N + zc * plane), stage, 4 * plane * i, 4 * plane));
+    const names = opts.names || Object.keys(prog.out), plane = Y * X, span = plane * (zhi - zc + 1);
+    const stage = dev.createBuffer({ size: 4 * span * names.length, usage: U.MAP_READ | U.COPY_DST });
+    names.forEach((n, i) => enc.copyBufferToBuffer(bx, 4 * (prog.out[n] * N + zc * plane), stage, 4 * span * i, 4 * span));
     dev.queue.submit([enc.finish()]);
     await stage.mapAsync(GPUMapMode.READ);
     const all = new Float32Array(stage.getMappedRange().slice(0));
     stage.unmap();
     [bx, bq, bk, bv, bl, bp, stage, ...uniforms].forEach((b) => b.destroy());
     const out = {};
-    names.forEach((n, i) => { out[n] = all.subarray(i * plane, (i + 1) * plane); });
+    names.forEach((n, i) => { out[n] = all.subarray(i * span, (i + 1) * span); });
     return out;
   }
 }

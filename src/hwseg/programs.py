@@ -13,18 +13,29 @@ def _step(x_w, b, gain=1.0, k=1.0):
     return x_w, b, k
 
 
-def cells(sigma_um=3.5, ratio=1.6, tau=0.12, sharp=8.0) -> "Program":  # noqa: F821
-    """Bright-blob (nuclei / NeuN soma) detector: DoG on log intensity => illumination-invariant log-ratio."""
+def _abs_mean_channel(B, a_ch, out_ch):
+    """Channels sp=relu(a), sn=relu(-a) (MLP units) so a global head over sp+sn gives mean|a| (in-context scale)."""
+    return [({a_ch: 1.0}, 0.0, {out_ch[0]: 1.0}), ({a_ch: -1.0}, 0.0, {out_ch[1]: 1.0})]
+
+
+def cells(sigma_um=3.5, ratio=1.6, kappa=2.0, tau0=0.03, sharp=400.0, scale=1.0) -> "Program":  # noqa: F821
+    """Bright-blob (nuclei / NeuN soma) detector: DoG on log intensity (illumination-invariant log-ratio).
+    Input is the display image u' in [0,1]. seg = step(dog - kappa*mean|dog| - tau0): kappa*mean|dog| is the FOV's own
+    response spread (global head), tau0 an absolute visibility floor in display units, so detection is contrast-robust
+    but vanishes in darkness, saturation and flat (zero-contrast) views.
+    `scale` multiplies every physical length: scale s targets blobs s times larger (nuclear clusters when zoomed out)."""
+    sigma_um = sigma_um * scale
     B = Builder("cells")
-    g1, g2, dog, seg = B.alloc(), B.alloc(), B.alloc(), B.alloc()
-    h1 = B.gaussian_head(B.d, 0, g1, cov_from_axes(sigma_um))
-    h2 = B.gaussian_head(B.d, 0, g2, cov_from_axes(sigma_um * ratio))
-    B.add_layer([h1, h2], B.mlp(B.d, [({g1: 1.0, g2: -1.0}, 0.0, {dog: 1.0})]))
-    # seg = clamp(sharp*(dog - tau), 0, 1) as relu(a) - relu(a-1)
-    B.add_layer([], B.mlp(B.d, [({dog: sharp}, -sharp * tau, {seg: 1.0}),
-                                ({dog: sharp}, -sharp * tau - 1.0, {seg: -1.0})]))
+    g1, g2, dog, sp_, sn_, gs, seg = (B.alloc() for _ in range(7))
+    B.add_layer([B.gaussian_head(B.d, 0, g1, cov_from_axes(sigma_um)), B.gaussian_head(B.d, 0, g2, cov_from_axes(sigma_um * ratio))],
+                B.mlp(B.d, [({g1: 1.0, g2: -1.0}, 0.0, {dog: 1.0}), ({g2: 1.0, g1: -1.0}, 0.0, {dog: -1.0})]))   # dog = relu(g1-g2) - relu(g2-g1)
+    B.add_layer([], B.mlp(B.d, _abs_mean_channel(B, dog, (sp_, sn_))))
+    H = B.global_head(B.d, sp_, gs); H.Wv[sn_] = 1.0                 # value = |dog|
+    B.add_layer([H])
+    B.add_layer([], B.mlp(B.d, [({dog: sharp, gs: -sharp * kappa}, -sharp * tau0, {seg: 1.0}),
+                                ({dog: sharp, gs: -sharp * kappa}, -sharp * tau0 - 1.0, {seg: -1.0})]))
     B.out = {"score": dog, "seg": seg}
-    B.meta = dict(kind="cells", min_um=2.0, max_um=12.0)
+    B.meta = dict(kind="cells", min_um=2.0 * scale, max_um=12.0 * scale, scale=scale, sigma0=3.5)
     return B.build()
 
 
@@ -37,9 +48,11 @@ def fib_dirs(n):
     return np.stack([z, r * np.cos(ph), r * np.sin(ph)], 1)
 
 
-def vessels(sigma_t=2.0, sigma_l=8.0, sigma_w=6.0, tau=0.2, n_dirs=26, sharp=6.0):
-    """Tubular-structure detector (no blob-rejection term: the design sweep showed it hurts).
-    score = max_d G_elong,d(logI) - G_wide(logI) - tau; max via a relu tournament."""
+def vessels(sigma_t=2.0, sigma_l=8.0, sigma_w=6.0, kappa=1.0, tau0=0.12, n_dirs=26, sharp=400.0, scale=1.0):
+    """Tubular-structure detector. r = max_d G_elong,d(logI) - G_wide(logI) (max via a relu tournament);
+    seg = clamp(sharp*(r - kappa*mean|r| - tau0)) with mean|r| from a global head (contrast-invariant threshold).
+    `scale` multiplies all lengths."""
+    sigma_t, sigma_l, sigma_w = sigma_t * scale, sigma_l * scale, sigma_w * scale
     B = Builder("vessels")
     gw = B.alloc()
     heads = [B.gaussian_head(B.d, 0, gw, cov_from_axes(sigma_w))]
@@ -53,19 +66,22 @@ def vessels(sigma_t=2.0, sigma_l=8.0, sigma_w=6.0, tau=0.2, n_dirs=26, sharp=6.0
     while len(cur) > 1:  # max(a,b) = b + relu(a-b)
         units, nxt = [], []
         for i in range(0, len(cur) - 1, 2):
-            a, b = cur[i], cur[i + 1]
-            units.append(({a: 1.0, b: -1.0}, 0.0, {b: 1.0}))
-            nxt.append(b)
+            a_, b_ = cur[i], cur[i + 1]
+            units.append(({a_: 1.0, b_: -1.0}, 0.0, {b_: 1.0}))
+            nxt.append(b_)
         if len(cur) % 2:
             nxt.append(cur[-1])
         B.add_layer([], B.mlp(B.d, units))
         cur = nxt
     D = cur[0]
-    score, seg = B.alloc(), B.alloc()
-    B.add_layer([], B.mlp(B.d, [({D: 1.0, gw: -1.0}, -tau, {score: 1.0})]))
+    rp, rn, gs, score, seg = (B.alloc() for _ in range(5))
+    B.add_layer([], B.mlp(B.d, [({D: 1.0, gw: -1.0}, 0.0, {rp: 1.0}), ({gw: 1.0, D: -1.0}, 0.0, {rn: 1.0})]))   # r = rp - rn
+    H = B.global_head(B.d, rp, gs); H.Wv[rn] = 1.0                    # value = |r|
+    B.add_layer([H])
+    B.add_layer([], B.mlp(B.d, [({rp: 1.0, gs: -kappa}, -tau0, {score: 1.0})]))
     B.add_layer([], B.mlp(B.d, [({score: sharp}, 0.0, {seg: 1.0}), ({score: sharp}, -1.0, {seg: -1.0})]))
     B.out = {"score": score, "seg": seg}
-    B.meta = dict(kind="vessels", min_um=2.0, max_um=15.0)
+    B.meta = dict(kind="vessels", min_um=2.0 * scale, max_um=15.0 * scale, scale=scale, sigma0=2.0)
     return B.build()
 
 
@@ -75,17 +91,32 @@ def _ramp(B, d, weights, bias, out, sharp):
     return [(w, sharp * bias, {out: 1.0}), (w, sharp * bias - 1.0, {out: -1.0})]
 
 
-def tissue(sigma_um=60.0, k_bg=0.8, k_gm=0.10, sharp=6.0):
-    """Coarse tissue program: smoothed log-intensity (a nuclear-density proxy) relative to tile-global mean
-    (uniform-attention head => in-context calibration). bg: much darker than the tile mean; gray: denser than the
-    tile mean; white: constant 0.5 logit. Class scores: bg, gray, white (argmax outside the net)."""
+def _indicators(B, m, gm, kappa_bg, kappa_gm, tau_dark, tau_g, sharp):
+    """bg / gray indicators from the density proxy m (smoothed display image) vs the FOV mean gm, in display units:
+    bg = dark (m < tau_dark, absolute) OR darker than the FOV mean by kappa_bg * mean|m-gm| (relative);
+    gray = denser than the FOV mean by kappa_gm * mean|m-gm| + tau_g. Hard-ish steps (steep ramps)."""
+    sp_, sn_, gs, bg, gray, bgr = (B.alloc() for _ in range(6))
+    B.add_layer([], B.mlp(B.d, [({m: 1.0, gm: -1.0}, 0.0, {sp_: 1.0}), ({gm: 1.0, m: -1.0}, 0.0, {sn_: 1.0})]))
+    H = B.global_head(B.d, sp_, gs); H.Wv[sn_] = 1.0                 # mean |m - gm|
+    B.add_layer([H], B.mlp(B.d, _ramp(B, B.d, {m: -1.0}, tau_dark, bg, sharp) +                              # absolute dark floor -> bg
+                           _ramp(B, B.d, {gm: 1.0, m: -1.0, gs: -kappa_bg}, 0.0, bgr, sharp) +             # relative darkness -> bgr
+                           _ramp(B, B.d, {m: 1.0, gm: -1.0, gs: -kappa_gm}, -tau_g, gray, sharp)))         # relative density -> gray
+    B.add_layer([], B.mlp(B.d, [({bgr: 1.0, bg: -1.0}, 0.0, {bg: 1.0})]))                                    # bg = max(bg_abs, bg_rel)
+    return bg, gray
+
+
+def tissue(sigma_um=60.0, kappa_bg=1.5, kappa_gm=0.3, tau_dark=0.08, tau_g=0.01, sharp=200.0, scale=1.0):
+    """Coarse tissue program on the display image u' in [0,1] (density proxy = G_sigma(u')). Thresholds are relative to
+    the FOV's own spread (global heads) with absolute floors (darkness => background; flat view => no gray).
+    Class scores: bg, gray, white (constant 0.5 logit; argmax outside the net)."""
+    sigma_um = sigma_um * scale
     B = Builder("tissue")
-    m, gm, bg, gray, white = (B.alloc() for _ in range(5))
-    B.add_layer([B.gaussian_head(B.d, 0, m, cov_from_axes(sigma_um)), B.global_head(B.d, 0, gm)],
-                B.mlp(B.d, _ramp(B, B.d, {gm: 1.0, m: -1.0}, -k_bg, bg, sharp) +
-                      _ramp(B, B.d, {m: 1.0, gm: -1.0}, -k_gm, gray, sharp) + [({4: 1.0}, 0.0, {white: 0.5})]))
+    m, gm, white = (B.alloc() for _ in range(3))
+    B.add_layer([B.gaussian_head(B.d, 0, m, cov_from_axes(sigma_um)), B.global_head(B.d, 0, gm)])
+    bg, gray = _indicators(B, m, gm, kappa_bg, kappa_gm, tau_dark, tau_g, sharp)
+    B.add_layer([], B.mlp(B.d, [({4: 1.0}, 0.0, {white: 0.5})]))
     B.out = {"bg": bg, "gray": gray, "white": white}
-    B.meta = dict(kind="tissue", min_um=30.0, max_um=1e9)
+    B.meta = dict(kind="tissue", min_um=30.0, max_um=1e9, scale=scale, sigma0=60.0, input="display")
     return B.build()
 
 
@@ -102,7 +133,7 @@ def layer_edges(sigmas, pia=PIA_DEPTHS_UM, wm=WM_DEPTHS_UM):
     return tuple(sv(t) for t in pia) + tuple(-sv(t) for t in wm)
 
 
-def layers(sigma_um=60.0, depth_sigmas=(150.0, 400.0, 900.0), k_bg=0.8, k_gm=0.10, sharp=6.0, band_sharp=14.0, edges=None):
+def layers(sigma_um=60.0, depth_sigmas=(150.0, 400.0, 900.0), kappa_bg=1.5, kappa_gm=0.3, tau_dark=0.08, tau_g=0.01, sharp=200.0, band_sharp=14.0, edges=None):
     """Cortical-layer program (coarse, ~80 um voxels). Hand-wired pipeline, no training:
       1. density proxy m = G_sigma(logI); bg / gray indicators relative to the tile-global mean (global head);
          white-matter indicator W = low density and not near the pia (so sparse layer I is not read as white matter).
@@ -113,9 +144,9 @@ def layers(sigma_um=60.0, depth_sigmas=(150.0, 400.0, 900.0), k_bg=0.8, k_gm=0.1
     Outputs: L1..L6, WM, bg. Anatomy priors are declared constants, not fitted."""
     edges = edges or layer_edges(depth_sigmas)
     B = Builder("layers")
-    m, gm, bgi, gi, W, Bs, Weff = (B.alloc() for _ in range(7))
-    B.add_layer([B.gaussian_head(B.d, 0, m, cov_from_axes(sigma_um)), B.global_head(B.d, 0, gm)],
-                B.mlp(B.d, _ramp(B, B.d, {gm: 1.0, m: -1.0}, -k_bg, bgi, sharp) + _ramp(B, B.d, {m: 1.0, gm: -1.0}, -k_gm, gi, sharp)))
+    m, gm, W, Bs, Weff = (B.alloc() for _ in range(5))
+    B.add_layer([B.gaussian_head(B.d, 0, m, cov_from_axes(sigma_um)), B.global_head(B.d, 0, gm)])
+    bgi, gi = _indicators(B, m, gm, kappa_bg, kappa_gm, tau_dark, tau_g, sharp)
     B.add_layer([], B.mlp(B.d, [({4: 1.0, bgi: -1.0, gi: -1.0}, 0.0, {W: 1.0})]))   # W = relu(1 - bg - gray)
     B.add_layer([B.gaussian_head(B.d, bgi, Bs, cov_from_axes(depth_sigmas[0]), extent=2.5)])   # pia proximity
     B.add_layer([], B.mlp(B.d, [({W: 1.0, Bs: -2.0}, 0.0, {Weff: 1.0})]))                      # Weff = relu(W - 2 Bs)
@@ -141,7 +172,7 @@ def layers(sigma_um=60.0, depth_sigmas=(150.0, 400.0, 900.0), k_bg=0.8, k_gm=0.1
     # gate: band <- min(band, 1 - bg - Weff) = band - relu(band + bg + Weff - 1)
     B.add_layer([], B.mlp(B.d, [({band: 1.0, bgi: 1.0, Weff: 1.0}, -1.0, {band: -1.0}) for band in bands]))
     B.out = {**{f"L{k + 1}": c for k, c in enumerate(bands)}, "WM": Wk[0], "bg": Bk[0]}
-    B.meta = dict(kind="layers", min_um=30.0, max_um=1e9, tile=64, edges=[round(e, 4) for e in edges])
+    B.meta = dict(kind="layers", min_um=30.0, max_um=1e9, tile=64, edges=[round(e, 4) for e in edges], input="display")
     return B.build()
 
 
@@ -149,3 +180,18 @@ def _ramp_band(sw, shift, out, sharp, sign):
     """sign * clamp(sharp*(s + shift), 0, 1) with s = sw.x."""
     w = {c: sharp * v for c, v in sw.items()}
     return [(w, sharp * shift, {out: sign}), (w, sharp * shift - 1.0, {out: -sign})]
+
+
+def exposure(a=4.75, b=6.82):
+    """Default-exposure program. Input ch0 = raw log(I+1) of the FOV (not the display image). Global heads give the FOV
+    mean gm and the mean negative / positive deviations n, p; outputs lo = gm - a*n and hi = gm + b*p (log-domain display
+    window, ~2nd..99.7th percentile on real crops; a, b are medians over a real-crop bank, scripts/fit_exposure.py) and
+    mean = gm. A viewer derives gamma from (mean-lo)/(hi-lo)."""
+    B = Builder("exposure")
+    gm, sp_, sn_, gp, gn, lo, hi = (B.alloc() for _ in range(7))
+    B.add_layer([B.global_head(B.d, 0, gm)], B.mlp(B.d, [({0: 1.0, gm: -1.0}, 0.0, {sp_: 1.0}), ({gm: 1.0, 0: -1.0}, 0.0, {sn_: 1.0})]))
+    B.add_layer([B.global_head(B.d, sp_, gp), B.global_head(B.d, sn_, gn)],
+                B.mlp(B.d, [({gm: 1.0, gn: -a}, 0.0, {lo: 1.0}), ({gm: 1.0, gp: b}, 0.0, {hi: 1.0})]))
+    B.out = {"lo": lo, "hi": hi, "mean": gm}
+    B.meta = dict(kind="exposure", input="log")
+    return B.build()

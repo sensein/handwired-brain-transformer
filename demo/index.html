@@ -31,6 +31,9 @@
   dt { color:var(--muted); } dd { margin:0; font-variant-numeric: tabular-nums; word-break:break-word; }
   .legend span { display:inline-block; width:10px; height:10px; border-radius:2px; margin:0 4px 0 8px; vertical-align:-1px; }
   .note { color:var(--muted); font-size:12px; margin-top:10px; }
+  #vpanel { margin-top:12px; } #vpanel .row { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:end; margin-bottom:8px; }
+  #vpanel label { margin:0; } #vpanel select, #vpanel input[type=range] { width:auto; min-width:90px; } #vpanel button { width:auto; margin:0; }
+  #v3cv { height:min(52vh, 460px); background:#000; border:1px solid var(--line); border-radius:8px; cursor:grab; }
   .warn { color:#c0561b; }
 </style>
 </head>
@@ -45,14 +48,41 @@
     <label for="sample">Slab (sample)</label><select id="sample"></select>
     <label for="chunk">Chunk</label><select id="chunk"></select>
     <label for="model">Segmentation model</label><select id="model"></select>
+    <label for="fscale">Feature scale (cells / vessels / tissue)</label>
+    <select id="fscale"><option value="auto">auto (follows zoom)</option><option value="1">x1 (native)</option><option value="2">x2</option><option value="4">x4</option><option value="8">x8</option></select>
     <label for="z">Plane (z, level-0 index): <span id="zval"></span></label><input id="z" type="range" min="0" max="2047" value="1024">
+    <label for="depth">Slab thickness (planes at the shown level)</label>
+    <div style="display:flex;gap:6px"><select id="depth"><option value="1">1 (single plane)</option><option value="3">3</option><option value="7">7</option><option value="15">15</option><option value="31">31</option></select>
+    <select id="dmode"><option value="max">max projection</option><option value="mean">mean</option></select></div>
     <label for="opacity">Overlay opacity</label><input id="opacity" type="range" min="0" max="100" value="70">
+    <label for="bri">Brightness: <span id="brival">0.00</span></label><input id="bri" type="range" min="-0.5" max="0.5" step="0.01" value="0">
+    <label for="con">Contrast: <span id="conval">1.00</span></label><input id="con" type="range" min="0.2" max="4" step="0.05" value="1">
+    <label for="gam">Gamma: <span id="gamval">1.00</span></label><input id="gam" type="range" min="0.2" max="3" step="0.05" value="1">
+    <label style="display:flex;gap:6px;align-items:center;color:var(--ink)"><input type="checkbox" id="autoexp" style="width:auto" checked> auto exposure from the model (sliders adjust on top)</label>
+    <button id="adjreset">Reset adjustments</button>
     <button id="reset">Jump to brightest tissue</button>
-    <p class="note">Drag to pan, wheel to zoom. In <b>Auto</b> the model and pyramid level follow the zoom: tissue when zoomed out, cells (YO/NN) or vessels (LEC) when zoomed in.</p>
+    <p class="note">Drag to pan, wheel to zoom, <b>Shift+wheel</b> or <b>PageUp/PageDown</b> (or arrow up/down) to move through depth (Shift: 10x). In <b>Auto</b> the model and pyramid level follow the zoom: tissue when zoomed out, cells (YO/NN) or vessels (LEC) when zoomed in.</p>
     <dl id="info" style="margin-top:12px"></dl>
   </section>
   <section>
     <div id="stage"><canvas id="cv"></canvas><div id="hud"></div><div id="scale"><i></i><span></span></div></div>
+    <div class="panel" id="vpanel">
+      <div class="row">
+        <button id="v3go">Render 3D from this view</button>
+        <label>Mode<br><select id="v3mode"><option value="1">composite</option><option value="0">MIP</option><option value="2">isosurface</option></select></label>
+        <label>Max size (voxels)<br><select id="v3size"><option>96</option><option selected>128</option><option>192</option></select></label>
+        <label>Region<br><select id="v3fit"><option value="native" selected>native scale, centre crop</option><option value="fit">fit whole FOV (coarser)</option></select></label>
+        <label>Depth (planes)<br><select id="v3depth"><option>16</option><option selected>32</option><option>64</option><option>128</option></select></label>
+        <label>Threshold<br><input id="v3thr" type="range" min="0" max="0.95" step="0.01" value="0.25"></label>
+        <label>Gain<br><input id="v3op" type="range" min="0.2" max="4" step="0.05" value="1.2"></label>
+        <label>Quality (steps)<br><input id="v3steps" type="range" min="48" max="512" step="16" value="160"></label>
+        <label><input type="checkbox" id="v3seg"> segmentation volume (runs the current model)</label>
+        <label>Seg opacity<br><input id="v3segop" type="range" min="0" max="1" step="0.05" value="0.7"></label>
+        <button id="v3reset">Reset camera</button>
+      </div>
+      <canvas id="v3cv"></canvas>
+      <p class="note" id="v3status">Drag to rotate, wheel to zoom. Uses the same view and exposure (model-recommended window and gamma, plus your brightness / contrast / gamma) as the 2D panel.</p>
+    </div>
     <p class="legend note" id="legend"></p>
     <p class="note" id="status"></p>
   </section>

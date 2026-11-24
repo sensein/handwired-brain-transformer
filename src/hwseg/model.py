@@ -62,6 +62,24 @@ class Program:
                 nz += int(np.count_nonzero(a))
         return tot, nz
 
+    @classmethod
+    def from_json(cls, text) -> "Program":
+        """Load a weight file written by to_json (or by hand: same schema; sparse {shape,i,v} matrices)."""
+        js = json.loads(text) if isinstance(text, (str, bytes)) else text
+
+        def dense(m):
+            a = np.zeros(int(np.prod(m["shape"])))
+            a[np.asarray(m["i"], dtype=int)] = m["v"]
+            return a.reshape(m["shape"])
+
+        layers = []
+        for L in js["layers"]:
+            heads = [Head(dense(h["Wq"]), dense(h["Wk"]), dense(h["Wv"]), dense(h["Wo"]),
+                          None if h["radius_um"] is None else np.asarray(h["radius_um"], float)) for h in L["heads"]]
+            m = L["mlp"]
+            layers.append(Layer(heads, None if m is None else MLP(dense(m["W1"]), dense(m["b1"]), dense(m["W2"]))))
+        return cls(js["name"], js["d"], layers, js["out"], js.get("meta", {}))
+
     def to_json(self) -> str:
         def a(x):
             return np.asarray(x, dtype=np.float64).tolist()
@@ -165,7 +183,8 @@ class WiredTransformer:
                 if h.radius_um is None:
                     o = v.mean().expand_as(v)
                 else:
-                    r = tuple(max(1, int(np.ceil(rr / s))) for rr, s in zip(h.radius_um, spacing))
+                    # keys outside the volume do not exist, so a window larger than the volume is clipped (exact)
+                    r = tuple(min(max(1, int(np.ceil(rr / s))), max(1, n - 1)) for rr, s, n in zip(h.radius_um, spacing, logI.shape))
                     if self.fast:
                         o = _fast_attn(v, h, spacing, r)
                     else:
