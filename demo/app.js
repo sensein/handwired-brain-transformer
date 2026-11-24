@@ -2,7 +2,7 @@ import { parseProgram, nParams, haloFor, GPUEngine, runCPU } from './engine.js';
 import { Zarr, clamp, S3 } from './zarr.js';
 import { VolumeView } from './volume.js';
 import { FAMILIES, familyForZoom, scaledModel, scaleLabel } from './route.js';
-import { recommendExposure, segVolume, labelVolume, paletteFor, segRegion, renderSegCanvas, regionStats, toCanvas, COLORS, IDENT, isIdent, adjustU, adjustLogVol, percentileWindow } from './seg.js';
+import { MULTI, MULTI_COLORS, recommendExposure, segVolume, labelVolume, paletteFor, segRegion, renderSegCanvas, regionStats, toCanvas, COLORS, IDENT, isIdent, adjustU, adjustLogVol, percentileWindow } from './seg.js';
 
 let TS = 128;                   // segmentation tile size (in-plane voxels); per-program via models/index.json
 let MAX_TILES = 48;           // tiles segmented per refresh (nearest the view center first)
@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 // ------------------------------------------------------------------------------------------ state
 const assets = await (await fetch('assets.json')).json();
 const modelIndex = await (await fetch('models/index.json')).json();
-const MODEL_LABEL = { tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
+const MODEL_LABEL = { fable_blobs: 'Cells, scale-invariant (hand-written: nucleus / soma / cluster)', fable_vessels: 'Vessels, scale-invariant (hand-written: capillary / vessel / large)', tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
 const programs = {};
 async function getProgram(name) { return programs[name] ||= parseProgram(await (await fetch(`models/${modelIndex[name].file}`)).text()); }
 
@@ -39,20 +39,24 @@ function fillChunks() { const cs = assets.filter((a) => a.stain === $('stain').v
 $('stain').onchange = () => { fillSamples(); openAsset(); };
 $('sample').onchange = () => { fillChunks(); openAsset(); };
 $('chunk').onchange = () => openAsset();
-$('model').onchange = $('fscale').onchange = () => { segTiles.clear(); segStats.clear(); fovSeg = null; schedule(); };
+$('model').onchange = $('fscale').onchange = () => { invalidateSeg(); schedule(); };
+$('debounce').oninput = () => { dbn.delay = +$('debounce').value; $('debval').textContent = dbn.delay; };
+$('segauto').onchange = () => { if ($('segauto').checked) schedule(0); else setStatus('manual mode: press "Run segmentation now" to segment this view'); };
+$('segrun').onclick = () => { clearTimeout(dbn.timer); gen++; dbn.chain = dbn.chain.then(() => refresh({ force: true })).catch((e) => console.error(e)); };
 $('opacity').oninput = () => draw();
 $('z').oninput = () => { view.z = +$('z').value; $('zval').textContent = view.z; draw(); schedule(); };
 $('reset').onclick = () => jumpToTissue();
 function readAdj() { adj.b = +$('bri').value; adj.c = +$('con').value; adj.g = +$('gam').value; $('brival').textContent = adj.b.toFixed(2); $('conval').textContent = adj.c.toFixed(2); $('gamval').textContent = adj.g.toFixed(2); }
-for (const id of ['bri', 'con', 'gam']) $(id).oninput = () => { readAdj(); repaintRaw(); segTiles.clear(); fovSeg = null; schedule(); };   // the model sees the display image, so it re-runs
-$('autoexp').onchange = () => { repaintRaw(); segTiles.clear(); fovSeg = null; schedule(); };
-$('adjreset').onclick = () => { $('bri').value = 0; $('con').value = 1; $('gam').value = 1; readAdj(); repaintRaw(); segTiles.clear(); fovSeg = null; schedule(); };
+for (const id of ['bri', 'con', 'gam']) $(id).oninput = () => { readAdj(); repaintRaw(); invalidateSeg(); schedule(dbn.delay + 250); };   // the model sees the display image, so it re-runs, after a longer settle
+$('autoexp').onchange = () => { repaintRaw(); invalidateSeg(); schedule(); };
+$('adjreset').onclick = () => { $('bri').value = 0; $('con').value = 1; $('gam').value = 1; readAdj(); repaintRaw(); invalidateSeg(); schedule(); };
 
 let dragging = null;
-cv.addEventListener('pointerdown', (e) => { cv.setPointerCapture(e.pointerId); dragging = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; });
+cv.addEventListener('pointerdown', (e) => { cv.setPointerCapture(e.pointerId); dragging = { x: e.clientX, y: e.clientY, cx: view.cx, cy: view.cy }; dbn.interacting++; });
 cv.addEventListener('pointermove', (e) => { if (!dragging) return; const k = view.p * (cv.width / cv.getBoundingClientRect().width);
   view.cx = dragging.cx - (e.clientX - dragging.x) * k; view.cy = dragging.cy - (e.clientY - dragging.y) * k; draw(); schedule(); });
-cv.addEventListener('pointerup', () => { dragging = null; });
+const endDrag = () => { if (!dragging) return; dragging = null; dbn.interacting = Math.max(0, dbn.interacting - 1); schedule(); };
+cv.addEventListener('pointerup', endDrag); cv.addEventListener('pointercancel', endDrag);
 function stepZ(dir, big) {
   const l = rawLevel(), nz = zarr.levels[0].shape[0], st = 2 ** l * (big ? 10 : 1);
   view.z = clamp(Math.round(view.z + dir * st), 0, nz - 1); $('z').value = view.z; $('zval').textContent = view.z; draw(); schedule();
@@ -78,7 +82,7 @@ function route() {
   if (family === 'none') return { model: 'none', level: 0 };
   const m = scaledModel(family, view.p, zarr, family === 'layers' ? 'auto' : $('fscale').value), kind = FAMILIES[family].kind;
   TS = modelIndex[m.model].tile || 128;
-  if (['cells', 'vessels'].includes(kind) && view.p > 16) note = 'zoom in for ' + kind;
+  if (['cells', 'vessels', 'blobs', 'vessels_ms'].includes(kind) && view.p > 16 && !FAMILIES[family].invariant) note = 'zoom in for ' + kind;
   return { ...m, kind, note, label: scaleLabel(kind, m.scale, m.sigmaUm) };
 }
 
@@ -153,11 +157,27 @@ function draw() {
 
 // ------------------------------------------------------------------------------------------ segmentation tiles
 const segKey = (m, l, z, gy, gx) => `${zarr.base}|${m}|${l}|${z}|${gy}|${gx}`;
-let timer = null;
-function schedule() { clearTimeout(timer); timer = setTimeout(refresh, 180); }
+// ---- debounced, interaction-aware, serialized segmentation scheduling
+const dbn = { delay: 350, interacting: 0, timer: null, chain: Promise.resolve() };
+const counts = { scheduled: 0, started: 0, tiles: 0, fov: 0 };
+let segStale = false;                                    // cached segmentation invalid (exposure / model changed): cleared when the next run starts
+const invalidateSeg = () => { segStale = true; };
+function schedule(delay) {
+  counts.scheduled++;
+  gen++;                                                 // cancels any in-flight run at its next checkpoint; stale results are never stored
+  clearTimeout(dbn.timer);
+  const d = delay ?? dbn.delay;
+  if ($('segauto').checked && curRoute && curRoute.model !== 'none') setStatus(`view changed: segmentation runs ${d} ms after you stop`);
+  dbn.timer = setTimeout(fire, d);
+}
+function fire() {
+  if (dbn.interacting > 0) { dbn.timer = setTimeout(fire, 120); return; }   // never while dragging
+  dbn.chain = dbn.chain.then(() => refresh()).catch((e) => console.error(e)); // serialized: never two GPU jobs at once
+}
 
 async function segTile(prog, name, l, zl, gy, gx, fovWin) {
   const L = zarr.levels[l], y0 = gy * TS, x0 = gx * TS, y1 = Math.min(y0 + TS, L.shape[1]), x1 = Math.min(x0 + TS, L.shape[2]);
+  counts.tiles++;
   const ea = effAdj();
   const r = await segRegion(zarr, engine, prog, l, zl, y0, y1, x0, x1, (v) => adjustLogVol(v, fovWin[0], fovWin[1], ea));
   segStats.set(segKey(name, l, zl, gy, gx), regionStats(modelIndex[name].kind, r, L.sp));
@@ -176,6 +196,7 @@ async function refreshFov(prog, r, myGen) {
   if (box[1] <= box[0] || box[3] <= box[2]) { fovSeg = null; draw(); setStatus('FOV outside the volume', true); return; }
   r.level = level; updateInfo(r);
   const L = zarr.levels[level], zl = clamp(Math.floor(view.z / 2 ** level), 0, L.shape[0] - 1), t0 = performance.now();
+  counts.fov++;
   const ea = effAdj();
   const seg = await segRegion(zarr, engine, prog, level, zl, box[0], box[1], box[2], box[3], (v) => { const w = viewWin(v); return adjustLogVol(v, w[0], w[1], ea); }, { halo: false });
   if (myGen !== gen) return;
@@ -199,9 +220,12 @@ async function updateExposure() {
   try { const r = await recommendExposure(zarr, engine, await getProgram('exposure'), l, zl, y0, y1, x0, x1); rec = { ...r, level: l }; if ($('autoexp').checked) repaintRaw(); } catch (e) { rec = null; }
 }
 
-async function refresh() {
+async function refresh(opts = {}) {
   updateViewWindow(); await updateExposure();
   if (!zarr) return;
+  if (!$('segauto').checked && !opts.force) { curRoute = route(); draw(); setStatus('manual mode: press "Run segmentation now" to segment this view'); return; }
+  if (segStale) { segTiles.clear(); segStats.clear(); fovSeg = null; segStale = false; }
+  counts.started++;
   const myGen = ++gen, r = route(); curRoute = r;
   const L = zarr.levels[r.level], sp = L.sp, W = cv.width, H = cv.height;
   updateInfo(r);
@@ -259,7 +283,7 @@ function updateInfo(r) {
     ['Parameters', np ? `${np.nonzero} nonzero (${np.total} dense)` : '-'], ['Layers / heads', prog ? `${prog.layers.length} / ${prog.layers.reduce((a, b) => a + b.heads.length, 0)}` : '-'],
     ['Streamed', `${(zarr.net / 1e6).toFixed(1)} MB (cache ${(zarr.bytes / 1e6).toFixed(0)} MB)`]];
   $('info').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
-  $('legend').innerHTML = r.kind === 'layers' ? ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'].map((k) => `<span style="background:rgb(${COLORS[k]})"></span>${k}`).join('') : r.kind === 'tissue' ? `<span style="background:rgb(90,90,100)"></span>background<span style="background:rgb(255,160,40)"></span>gray<span style="background:rgb(60,140,255)"></span>white` : r.kind === 'vessels' ? '<span style="background:rgb(40,220,255)"></span>vessel' : r.kind === 'cells' ? '<span style="background:rgb(255,60,200)"></span>cell' : '';
+  $('legend').innerHTML = MULTI[r.kind] ? MULTI[r.kind].map((k) => `<span style="background:rgb(${MULTI_COLORS[k]})"></span>${k}`).join('') : r.kind === 'layers' ? ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'].map((k) => `<span style="background:rgb(${COLORS[k]})"></span>${k}`).join('') : r.kind === 'tissue' ? `<span style="background:rgb(90,90,100)"></span>background<span style="background:rgb(255,160,40)"></span>gray<span style="background:rgb(60,140,255)"></span>white` : r.kind === 'vessels' ? '<span style="background:rgb(40,220,255)"></span>vessel' : r.kind === 'cells' ? '<span style="background:rgb(255,60,200)"></span>cell' : '';
 }
 
 // ------------------------------------------------------------------------------------------ asset handling
@@ -295,7 +319,7 @@ if (H.get('p')) {   // deep link from the slab gallery: #id=<zarr>&p=<um/px>&cx=
   Object.assign(view, { p: +H.get('p'), cx: +H.get('cx'), cy: +H.get('cy'), z: clamp(+H.get('z'), 0, zarr.levels[0].shape[0] - 1) });
   $('z').value = view.z; $('zval').textContent = view.z; draw(); schedule();
 }
-window.__hw = { setMaxTiles: (n) => { MAX_TILES = n; }, resetSeg: () => { segTiles.clear(); segStats.clear(); fovSeg = null; document.getElementById('status').textContent = ''; }, segSummary, adj, repaintRaw, segTiles, segStats, view, draw, schedule, get status() { return document.getElementById('status').textContent; }, get route() { return curRoute; } };
+window.__hw = { counts, dbn, setMaxTiles: (n) => { MAX_TILES = n; }, resetSeg: () => { segTiles.clear(); segStats.clear(); fovSeg = null; document.getElementById('status').textContent = ''; }, segSummary, adj, repaintRaw, segTiles, segStats, view, draw, schedule, get status() { return document.getElementById('status').textContent; }, get route() { return curRoute; } };
 
 // ------------------------------------------------------------------------------------------ 3D volume view
 let vv = null, last3d = null;

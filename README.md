@@ -102,6 +102,11 @@ https://sensein.github.io/handwired-brain-transformer/.
     option shows a max projection or mean over 1–31 planes.
   * *Exposure*: brightness / contrast / gamma sliders on top of the model-recommended window and gamma (toggle "auto
     exposure"); the models always see the adjusted display image.
+  * *Debounced segmentation*: raw pixels update immediately, but the models run only after the view settles (default
+    350 ms, adjustable; exposure sliders wait 250 ms longer), never while you drag, one serialized GPU job at a time,
+    and an in-flight run is cancelled when the view changes again. A manual mode ("Run segmentation now") is available.
+    Measured with Playwright (`demo/test/debounce_test.mjs`): 40 drag events started 0 runs and then 1; a 20-event wheel
+    burst gave 1 run; a 15-event slider burst gave 1 run after the longer settle.
   * *3D*: a WebGL2 ray-marcher (MIP, composite with early termination, isosurface; rotate / zoom; threshold, gain,
     quality) renders the current field of view and depth slab from an 8-bit 3D texture, optionally overlaying the
     segmentation computed for the whole volume (WebGPU engine returns every plane of the slab).
