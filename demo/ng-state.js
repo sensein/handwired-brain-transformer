@@ -19,7 +19,7 @@ export function ngState(ids, L0, view, exposure = null) {
   return {
     dimensions: { t: [1, 's'], z: [um(sp[0]), 'm'], y: [um(sp[1]), 'm'], x: [um(sp[2]), 'm'] },
     position: [0, view.z + off[0] / sp[0], view.cy / sp[1] + off[1] / sp[1], view.cx / sp[2] + off[2] / sp[2]],
-    crossSectionScale: view.p / sp[2], layout: 'xy', displayDimensions: ['x', 'y', 'z'],
+    crossSectionScale: view.p / sp[2], layout: 'xy', displayDimensions: ['x', 'y', 'z'], showDefaultAnnotations: false,
     layers: [{ type: 'image', name: ids.length > 1 ? `slab (${ids.length} strips)` : 'strip', source: ids.length > 1 ? ids.map(ZARR_URL) : ZARR_URL(ids[0]), shader: NG_SHADER,
       shaderControls: exposure ? { lo: +exposure.lo.toFixed(2), hi: +exposure.hi.toFixed(2), gamma: +exposure.gamma.toFixed(2) } : {} }],
   };

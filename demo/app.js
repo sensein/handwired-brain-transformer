@@ -63,6 +63,12 @@ $('opacity').oninput = () => draw();
 $('z').oninput = () => { view.z = +$('z').value; $('zval').textContent = view.z; draw(); schedule(); };
 $('reset').onclick = () => jumpToTissue();
 $('fit').onclick = () => zarr && fitView();
+$('seams').onchange = async () => {   // opt-in local seam correction for stitched slabs (see README for the measured effect)
+  if (!zarr || !zarr.setSeams) { banner.log('seam correction applies to stitched slabs only'); $('seams').checked = false; return; }
+  const bt = banner.start('other', 'Estimating seam difference fields (coarsest level)');
+  try { await zarr.setSeams($('seams').checked); banner.finish(bt, true, `${zarr.seam ? zarr.seam.size : 0} seams`); } catch (e) { banner.finish(bt, false, e.message); }
+  rawTiles.clear(); segTiles.clear(); segStats.clear(); fovSeg = null; draw(); schedule(0);
+};
 $('ngopen').onclick = () => {   // the same slab, position, zoom and model-recommended exposure in our hosted Neuroglancer
   if (!zarr) return; const L0 = zarr.levels[0], ids = zarr.ids || [new URL(zarr.base).pathname.split('/').filter(Boolean).pop()];
   const st = ngState(ids, { sp: L0.sp, off: zarr.ids ? L0.origin : L0.tr }, view, rec);

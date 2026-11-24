@@ -15,6 +15,7 @@ await page.waitForFunction(() => window.__hw && window.__hw.view, null, { timeou
 await page.click('#bn-toggle');
 const t0 = Date.now(); let st = '';
 while (Date.now() - t0 < 150000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hw.status); if (/FOV forward/.test(st)) break; }
+if (process.env.SEAMS) { await page.check('#seams'); await page.waitForTimeout(45000); console.log('seams banner log:', (await page.textContent('#bn-log')).split('\n').filter((l) => /seam/i.test(l)).slice(-2).join(' | ')); }
 await page.waitForTimeout(3000);
 const info = await page.evaluate(() => ({ levels: window.__hw.zarr ? window.__hw.zarr.levels.length : null, view: { ...window.__hw.view }, banner: document.getElementById('bn-line').textContent, meta: document.getElementById('bn-meta').textContent, sel: [...document.querySelectorAll('#chunk option')][0].textContent }));
 console.log(JSON.stringify(info)); console.log('status:', st);

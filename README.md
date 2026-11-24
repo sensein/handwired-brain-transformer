@@ -140,9 +140,16 @@ https://sensein.github.io/handwired-brain-transformer/.
   * *Whole stitched slabs, not just strips*: a slab acquisition is 8–11 strips stacked along y (each ~7.4 mm tall, up to
     127 mm long, ~0.8 mm overlap, z and x origins drifting by up to ~0.5 mm). The viewer stitches them from the physical
     translation stored in each zarr (what Neuroglancer does with a multi-source layer), blending overlaps with a feathered
-    average; a strip that covers most of an earlier strip's region is a re-acquisition and is left out of the stitch
+    average; overlaps are cross-faded with a smoothstep; a strip that covers most of an earlier strip's region is a re-acquisition and is left out of the stitch
     (listed as "strip N only"). YO sample 90 opens as one 2259 × 18542 × 49819-voxel slab at overview zoom. You can also
     **paste a dashboard / Neuroglancer link**: every DANDI zarr source in it is mapped to the stitched slab.
+  * *Seams between strips*: visible horizontal banding remains in YO and NN. Measured (`scripts/seam_metric.py`, vertical-gradient
+    energy inside strip overlaps over elsewhere; 1.0 = invisible): a local correction of the smooth log-difference field inside each
+    overlap (tapered to zero at the overlap's end, so strip interiors are untouched) moves LEC 1.59 -> 1.35 (1.22 when estimated
+    at a costlier level), is neutral on NN (1.07 -> 1.09) and slightly worse on YO (1.67 -> 1.72), so it is an opt-in
+    "correct strip seams" toggle. Tried and rejected: chained per-strip gain offsets (accumulate a ramp; detrended they vanish) and a
+    common flat-field profile along the strip (worse on NN). The banding therefore is not a simple per-strip gain or vignette; its
+    cause is not established. Neuroglancer's native multi-source layer has no seam handling at all.
   * *Status banner* (top, expandable): current stage (open, tissue scan, streaming, exposure, inference with fetch vs run,
     3D build, waiting for the view to settle), elapsed time, tile progress, chunks / MB streamed and a short log.
   * *Depth like Neuroglancer*: Shift+wheel, PageUp/PageDown or arrow keys step through z (Shift: x10); a slab-thickness
