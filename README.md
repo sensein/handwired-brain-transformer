@@ -122,7 +122,7 @@ Subagents wrote these weight files by hand (no optimizer, no builder imports, ev
 looking at images): `fable_blobs_v2.json` and `fable_vessels_v2.json` (round 2, the **defaults for zoomed-in views**, levels
 0-1), the heavier round-1 `fable_blobs.json` / `fable_vessels.json` (octave scales up to 80 um, selectable as experimental)
 and `fable_exposure.json`. Generators, the iteration log and montages are in `weights/fable/` (`NOTES.md`, `figs/`).
-All are numerically identical in the Python, JavaScript and WebGPU engines (<= 1.4e-4 on soft channels, hard outputs exact).
+The cell / vessel / exposure files are numerically identical in the Python, JavaScript and WebGPU engines (<= 1.4e-4 on soft channels, hard outputs exact).
 
 | file | d | layers | nonzero params | what it does |
 |---|---|---|---|---|
@@ -147,6 +147,8 @@ by design; contrast >= 2 and gamma still change the masks (IoU 0.2-0.7); blobs v
 numbers exist (no labels). `demo/test/fable_viewer.mjs` runs a hand-written model in the viewer.
 
 ### Tissue and cortex vs white matter (hand-written, YO/NN)
+
+Engine check on a real level-6 window of a stitched NN slab (a sub-mm phantom is useless here: these coarse programs correctly abstain on it, which makes every comparison 0 = 0): WebGPU vs Python <= 4.8e-4 (tissue exact to 8e-6); the JS reference engine differs from Python by up to 1.3e-2 on soft channels of cortex / layers, whose very steep thresholds flip a few voxels under float32 rounding.
 
 `fable_tissue.json` (d 57, 543 nonzero params), `fable_cortex_wm.json` (d 62, 598) and the experimental `fable_layers.json`
 (d 69, 649) are hard class maps for pyramid levels 4-6 (whole-slab and multi-mm views). Tissue builds a soft CDF of the

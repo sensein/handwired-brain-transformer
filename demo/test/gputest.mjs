@@ -21,7 +21,7 @@ const res = await page.evaluate(async () => {
   const out = {};
   for (const [name, g] of Object.entries(gold)) {
     const prog = E.parseProgram(await (await fetch(`/models/${name}.json`)).text());
-    const [Z, Y, X] = g.dims, zc = name === 'tissue' ? 6 : name === 'layers' ? 4 : 7;
+    const [Z, Y, X] = g.dims, zc = Z >> 1;   // middle plane of the golden volume
     const r = await eng.run(prog, Float32Array.from(g.logI), g.dims, g.spacing, zc);
     for (const [k, ref] of Object.entries(g.out)) {
       let md = 0, mx = 0;

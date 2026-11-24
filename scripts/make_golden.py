@@ -32,9 +32,14 @@ for nm in ("fable_blobs", "fable_vessels", "fable_exposure", "fable_blobs_v2", "
     if not os.path.exists(f):
         continue
     pr = Program.from_json(open(f).read())
-    vin = np.log(vol + 1).astype(np.float32) if nm == "fable_exposure" else L        # exposure takes raw log(I+1); the others the display image
-    r = WiredTransformer(pr, torch.float32, fast=False).forward(torch.as_tensor(vin), sp)
-    out[nm] = dict(dims=list(vin.shape), spacing=list(sp), logI=vin.ravel().tolist(), out={k: t.numpy().ravel().tolist() for k, t in r.items()})
+    vin, spn = (np.log(vol + 1).astype(np.float32), sp) if nm == "fable_exposure" else (L, sp)        # exposure takes raw log(I+1); the others the display image
+    if nm in ("fable_tissue", "fable_cortex_wm", "fable_layers"):
+        # coarse-scale programs abstain on a sub-mm phantom: use a real level-6 window of a stitched NN slab (tissue edge + background)
+        bk = os.environ.get("SLABBANK", "/orcd/scratch/bcs/002/satra/hwseg-tmp/fable/slabbank")
+        bv = np.load(bk + ".npz")["NN_86_L6_full"].astype(np.float32); zc = bv.shape[0] // 2
+        vin = display(bv[zc - 1: zc + 2, 95:159, 330:394]); spn = (164.0, 232.0, 164.0)
+    r = WiredTransformer(pr, torch.float32, fast=False).forward(torch.as_tensor(vin), spn)
+    out[nm] = dict(dims=list(vin.shape), spacing=list(spn), logI=vin.ravel().tolist(), out={k: t.numpy().ravel().tolist() for k, t in r.items()})
 json.dump(out, open(sys.argv[1], "w"), separators=(",", ":"))
 print({k: len(v["logI"]) for k, v in out.items()})
 
@@ -54,8 +59,13 @@ for nm in ("fable_blobs", "fable_vessels", "fable_exposure", "fable_blobs_v2", "
     if not os.path.exists(f):
         continue
     pr = Program.from_json(open(f).read())
-    vin = np.log(vol + 1).astype(np.float32) if nm == "fable_exposure" else L        # exposure takes raw log(I+1); the others the display image
-    r = WiredTransformer(pr, torch.float32, fast=False).forward(torch.as_tensor(vin), sp)
-    out[nm] = dict(dims=list(vin.shape), spacing=list(sp), logI=vin.ravel().tolist(), out={k: t.numpy().ravel().tolist() for k, t in r.items()})
+    vin, spn = (np.log(vol + 1).astype(np.float32), sp) if nm == "fable_exposure" else (L, sp)        # exposure takes raw log(I+1); the others the display image
+    if nm in ("fable_tissue", "fable_cortex_wm", "fable_layers"):
+        # coarse-scale programs abstain on a sub-mm phantom: use a real level-6 window of a stitched NN slab (tissue edge + background)
+        bk = os.environ.get("SLABBANK", "/orcd/scratch/bcs/002/satra/hwseg-tmp/fable/slabbank")
+        bv = np.load(bk + ".npz")["NN_86_L6_full"].astype(np.float32); zc = bv.shape[0] // 2
+        vin = display(bv[zc - 1: zc + 2, 95:159, 330:394]); spn = (164.0, 232.0, 164.0)
+    r = WiredTransformer(pr, torch.float32, fast=False).forward(torch.as_tensor(vin), spn)
+    out[nm] = dict(dims=list(vin.shape), spacing=list(spn), logI=vin.ravel().tolist(), out={k: t.numpy().ravel().tolist() for k, t in r.items()})
 json.dump(out, open(sys.argv[1], "w"), separators=(",", ":"))
 print({k: len(v["logI"]) for k, v in out.items()})
