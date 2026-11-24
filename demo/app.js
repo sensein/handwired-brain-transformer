@@ -1,78 +1,15 @@
 import { parseProgram, nParams, haloFor, GPUEngine, runCPU } from './engine.js';
-import { bloscDecode } from './blosc.js';
-import * as fz from 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/esm/index.mjs';
+import { Zarr, clamp, S3 } from './zarr.js';
+import { segRegion, renderSegCanvas, toCanvas, COLORS } from './seg.js';
 
-const S3 = 'https://dandiarchive.s3.amazonaws.com/zarr/';
-const TS = 128;                 // segmentation tile size (in-plane voxels)
+let TS = 128;                   // segmentation tile size (in-plane voxels); per-program via models/index.json
 const MAX_TILES = 48;           // tiles segmented per refresh (nearest the view center first)
 const $ = (id) => document.getElementById(id);
-const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
-
-// ------------------------------------------------------------------------------------------ streaming zarr
-class Limiter { constructor(n) { this.n = n; this.q = []; this.run = 0; }
-  async go(fn) { if (this.run >= this.n) await new Promise((r) => this.q.push(r)); this.run++;
-    try { return await fn(); } finally { this.run--; const r = this.q.shift(); if (r) r(); } } }
-
-class Zarr {
-  constructor(id) { this.base = S3 + id; this.cache = new Map(); this.bytes = 0; this.net = 0; this.lim = new Limiter(8); this.inflight = new Map(); }
-  async init() {
-    const attrs = await (await fetch(this.base + '/.zattrs')).json();
-    const ds = attrs.multiscales[0].datasets;
-    this.levels = await Promise.all(ds.map(async (d) => {
-      const za = await (await fetch(`${this.base}/${d.path}/.zarray`)).json();
-      const sc = d.coordinateTransformations.find((t) => t.type === 'scale').scale.slice(-3);
-      return { path: d.path, shape: za.shape.slice(-3), chunks: za.chunks.slice(-3), sp: sc };
-    }));
-    this.top = this.levels.length - 1;
-  }
-  chunk(l, cz, cy, cx) {
-    const key = `${l}/${cz}/${cy}/${cx}`, hit = this.cache.get(key);
-    if (hit) { this.cache.delete(key); this.cache.set(key, hit); return Promise.resolve(hit); }
-    if (this.inflight.has(key)) return this.inflight.get(key);
-    const L = this.levels[l], n = L.chunks[0] * L.chunks[1] * L.chunks[2];
-    const p = this.lim.go(async () => {
-      let arr;
-      try {
-        const r = await fetch(`${this.base}/${L.path}/0/0/${cz}/${cy}/${cx}`);
-        if (!r.ok) arr = new Uint16Array(n);
-        else {
-          const buf = new Uint8Array(await r.arrayBuffer()); this.net += buf.length;
-          const raw = bloscDecode(buf, (s, o) => fz.decompress(s, o));
-          arr = new Uint16Array(raw.buffer, raw.byteOffset, raw.byteLength >> 1);
-        }
-      } catch (e) { arr = new Uint16Array(n); }
-      this.cache.set(key, arr); this.bytes += arr.byteLength;
-      for (const [k, v] of this.cache) { if (this.bytes < 700e6) break; this.cache.delete(k); this.bytes -= v.byteLength; }
-      this.inflight.delete(key);
-      return arr;
-    });
-    this.inflight.set(key, p);
-    return p;
-  }
-  // log(I+1) crop as Float32Array [z0,z1)x[y0,y1)x[x0,x1)
-  async crop(l, z0, z1, y0, y1, x0, x1) {
-    const L = this.levels[l], [cz, cy, cx] = L.chunks, out = new Float32Array((z1 - z0) * (y1 - y0) * (x1 - x0));
-    const jobs = [];
-    for (let a = Math.floor(z0 / cz); a <= Math.floor((z1 - 1) / cz); a++)
-      for (let b = Math.floor(y0 / cy); b <= Math.floor((y1 - 1) / cy); b++)
-        for (let c = Math.floor(x0 / cx); c <= Math.floor((x1 - 1) / cx); c++)
-          jobs.push(this.chunk(l, a, b, c).then((data) => ({ a, b, c, data })));
-    for (const { a, b, c, data } of await Promise.all(jobs)) {
-      const zs = Math.max(z0, a * cz), ze = Math.min(z1, (a + 1) * cz), ys = Math.max(y0, b * cy), ye = Math.min(y1, (b + 1) * cy),
-        xs = Math.max(x0, c * cx), xe = Math.min(x1, (c + 1) * cx);
-      for (let z = zs; z < ze; z++) for (let y = ys; y < ye; y++) {
-        let src = ((z - a * cz) * cy + (y - b * cy)) * cx + (xs - c * cx), dst = ((z - z0) * (y1 - y0) + (y - y0)) * (x1 - x0) + (xs - x0);
-        for (let x = xs; x < xe; x++) out[dst++] = Math.log(data[src++] + 1);
-      }
-    }
-    return out;
-  }
-}
 
 // ------------------------------------------------------------------------------------------ state
 const assets = await (await fetch('assets.json')).json();
 const modelIndex = await (await fetch('models/index.json')).json();
-const MODEL_LABEL = { tissue: 'Tissue (bg / gray / white)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
+const MODEL_LABEL = { tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (coarse)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
 const programs = {};
 async function getProgram(name) { return programs[name] ||= parseProgram(await (await fetch(`models/${modelIndex[name].file}`)).text()); }
 
@@ -123,20 +60,21 @@ function route() {
   const sp0 = zarr.levels[0].sp;
   let model = sel, note = '';
   if (sel === 'auto') {
-    if (view.p >= 8.5) { model = 'tissue'; if (view.p < 30) note = 'mid zoom: no layer model yet, showing tissue scale'; }
+    if (view.p >= 8.5) model = view.p < 30 ? 'layers' : 'tissue';
     else model = ['LEC', 'CD31'].includes(stain) ? 'vessels_26dir' : 'cells';
   }
   if (model === 'none') return { model, level: 0 };
   const kind = modelIndex[model].kind;
+  TS = modelIndex[model].tile || 128;
   let level = 0;
-  if (kind === 'tissue') level = clamp(Math.ceil(Math.log2(view.p / sp0[2])), Math.min(4, zarr.top), Math.min(5, zarr.top));
+  if (kind === 'layers') level = Math.min(5, zarr.top);
+  else if (kind === 'tissue') level = clamp(Math.ceil(Math.log2(view.p / sp0[2])), Math.min(4, zarr.top), Math.min(5, zarr.top));
   else if (view.p > 14) note = 'zoom in for ' + kind + ' (needs about ' + sp0[2].toFixed(1) + ' um voxels)';
   return { model, level, kind, note };
 }
 
 // ------------------------------------------------------------------------------------------ rendering
 function rawLevel() { let l = 0; for (let i = 0; i < zarr.levels.length; i++) if (zarr.levels[i].sp[2] <= view.p * 1.0) l = i; return l; }
-function toCanvas(arr, w, h, f) { const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d'), im = g.createImageData(w, h); f(im.data); g.putImageData(im, 0, 0); return c; }
 
 function rawTile(l, zl, cy, cx) {
   const key = `${zarr.base}|${l}|${zl}|${cy}|${cx}`, hit = rawTiles.get(key);
@@ -197,21 +135,9 @@ let timer = null;
 function schedule() { clearTimeout(timer); timer = setTimeout(refresh, 180); }
 
 async function segTile(prog, name, l, zl, gy, gx) {
-  const L = zarr.levels[l], sp = L.sp, [hz, hy, hx] = haloFor(prog, sp);
-  const y0 = gy * TS, x0 = gx * TS, y1 = Math.min(y0 + TS, L.shape[1]), x1 = Math.min(x0 + TS, L.shape[2]);
-  const zs = Math.max(0, zl - hz), ze = Math.min(L.shape[0], zl + hz + 1), ys = Math.max(0, y0 - hy), ye = Math.min(L.shape[1], y1 + hy), xs = Math.max(0, x0 - hx), xe = Math.min(L.shape[2], x1 + hx);
-  const vol = await zarr.crop(l, zs, ze, ys, ye, xs, xe), dims = [ze - zs, ye - ys, xe - xs], zc = zl - zs;
-  let out;
-  if (engine) out = await engine.run(prog, vol, dims, sp, zc);
-  else { if (dims[0] * dims[1] * dims[2] > 150000) throw new Error('tile too large for CPU reference'); const o = runCPU(prog, vol, dims, sp), pl = dims[1] * dims[2]; out = {}; for (const k in o) out[k] = o[k].subarray(zc * pl, (zc + 1) * pl); }
-  const w = x1 - x0, h = y1 - y0, ox = x0 - xs, oy = y0 - ys, kind = modelIndex[name].kind;
-  return toCanvas(null, w, h, (px) => {
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const i = (oy + y) * dims[2] + ox + x, o = 4 * (y * w + x);
-      if (kind === 'tissue') { const sc = [out.bg[i], out.gray[i], out.white[i]], a = sc.indexOf(Math.max(...sc)), c = COLORS[['bg', 'gray', 'white'][a]]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = a === 0 ? 150 : 200; }
-      else { const v = clamp(out.seg[i], 0, 1), c = kind === 'vessels' ? [40, 220, 255] : [255, 60, 200]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = v * 255; }
-    }
-  });
+  const L = zarr.levels[l], y0 = gy * TS, x0 = gx * TS, y1 = Math.min(y0 + TS, L.shape[1]), x1 = Math.min(x0 + TS, L.shape[2]);
+  const r = await segRegion(zarr, engine, prog, l, zl, y0, y1, x0, x1);
+  return renderSegCanvas(modelIndex[name].kind, r);
 }
 
 async function refresh() {
@@ -219,7 +145,7 @@ async function refresh() {
   const myGen = ++gen, r = route(); curRoute = r;
   const L = zarr.levels[r.level], sp = L.sp, W = cv.width, H = cv.height;
   updateInfo(r);
-  if (r.model === 'none' || (r.kind && r.kind !== 'tissue' && view.p > 14)) { draw(); setStatus(r.model === 'none' ? 'Raw only.' : r.note, true); return; }
+  if (r.model === 'none' || (r.kind && !['tissue', 'layers'].includes(r.kind) && view.p > 14)) { draw(); setStatus(r.model === 'none' ? 'Raw only.' : r.note, true); return; }
   const prog = await getProgram(r.model); updateInfo(r);
   const x0 = view.cx - W / 2 * view.p, y0 = view.cy - H / 2 * view.p, x1 = view.cx + W / 2 * view.p, y1 = view.cy + H / 2 * view.p;
   const nx = Math.ceil(L.shape[2] / TS), ny = Math.ceil(L.shape[1] / TS);
@@ -254,7 +180,7 @@ function updateInfo(r) {
     ['Parameters', np ? `${np.nonzero} nonzero (${np.total} dense)` : '-'], ['Layers / heads', prog ? `${prog.layers.length} / ${prog.layers.reduce((a, b) => a + b.heads.length, 0)}` : '-'],
     ['Streamed', `${(zarr.net / 1e6).toFixed(1)} MB (cache ${(zarr.bytes / 1e6).toFixed(0)} MB)`]];
   $('info').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
-  $('legend').innerHTML = r.kind === 'tissue' ? `<span style="background:rgb(90,90,100)"></span>background<span style="background:rgb(255,160,40)"></span>gray<span style="background:rgb(60,140,255)"></span>white` : r.kind === 'vessels' ? '<span style="background:rgb(40,220,255)"></span>vessel' : r.kind === 'cells' ? '<span style="background:rgb(255,60,200)"></span>cell' : '';
+  $('legend').innerHTML = r.kind === 'layers' ? ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'].map((k) => `<span style="background:rgb(${COLORS[k]})"></span>${k}`).join('') : r.kind === 'tissue' ? `<span style="background:rgb(90,90,100)"></span>background<span style="background:rgb(255,160,40)"></span>gray<span style="background:rgb(60,140,255)"></span>white` : r.kind === 'vessels' ? '<span style="background:rgb(40,220,255)"></span>vessel' : r.kind === 'cells' ? '<span style="background:rgb(255,60,200)"></span>cell' : '';
 }
 
 // ------------------------------------------------------------------------------------------ asset handling
@@ -281,8 +207,13 @@ async function openAsset() {
 
 fitCanvas();
 fillSamples();
-const pick = assets.find((a) => a.stain === 'YO' && a.sample === '90' && a.chunk === 5) || assets[0];
+const H = new URLSearchParams(location.hash.slice(1));
+const pick = assets.find((a) => a.zarr === H.get('id')) || assets.find((a) => a.stain === 'YO' && a.sample === '90' && a.chunk === 5) || assets[0];
 $('stain').value = pick.stain; fillSamples(); $('sample').value = pick.sample; fillChunks(); $('chunk').value = pick.zarr;
 $('z').value = view.z; $('zval').textContent = view.z;
 await openAsset();
+if (H.get('p')) {   // deep link from the slab gallery: #id=<zarr>&p=<um/px>&cx=<um>&cy=<um>&z=<level-0 plane>
+  Object.assign(view, { p: +H.get('p'), cx: +H.get('cx'), cy: +H.get('cy'), z: clamp(+H.get('z'), 0, zarr.levels[0].shape[0] - 1) });
+  $('z').value = view.z; $('zval').textContent = view.z; draw(); schedule();
+}
 window.__hw = { view, draw, schedule, get status() { return document.getElementById('status').textContent; }, get route() { return curRoute; } };

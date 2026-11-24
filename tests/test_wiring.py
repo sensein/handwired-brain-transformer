@@ -54,3 +54,19 @@ def test_fast_path_equals_dense_attention_for_programs():
         a = WiredTransformer(prog, torch.float64, fast=False).forward(L, sp)["score"]
         b = WiredTransformer(prog, torch.float64, fast=True).forward(L, sp)["score"]
         assert torch.allclose(a, b, atol=1e-7), (prog.name, (a - b).abs().max().item())
+
+
+def test_layers_program_orders_layers_by_depth():
+    """Coarse layers: depth-ordered, within one layer for most cortex voxels (exact-layer accuracy is lower)."""
+    from hwseg.phantom import make_cortex_phantom
+    from hwseg.programs import layers
+    vol, lab, sp = make_cortex_phantom(seed=2)
+    out = WiredTransformer(layers(), dtype=torch.float32, fast=True).forward(torch.log(torch.as_tensor(vol) + 1), sp)
+    names = ["bg", "L1", "L2", "L3", "L4", "L5", "L6", "WM"]
+    pred = np.stack([out[n].numpy() for n in names]).argmax(0)[lab.shape[0] // 2]
+    t = lab[lab.shape[0] // 2]
+    cortex = (t >= 1) & (t <= 6)
+    within1 = (np.abs(pred - t) <= 1)[cortex].mean()
+    bgwm = (pred == t)[(t == 0) | (t == 7)].mean()
+    means = [pred[t == k].mean() for k in range(1, 7)]
+    assert within1 > 0.85 and bgwm > 0.95 and all(a < b for a, b in zip(means, means[1:])), (within1, bgwm, means)

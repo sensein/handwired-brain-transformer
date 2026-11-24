@@ -29,8 +29,9 @@ checks this against an explicit kernel to 1e-9.) Other building blocks:
 
 | Program | Scale | What it computes | Nonzero params |
 |---|---|---|---|
-| `tissue` | ≥ 40 µm voxels (pyramid L4–L5) | smoothed log-intensity and local texture vs. tile-global stats → bg / gray / white scores | 53 |
-| `cells` | 2.6 µm (L0) | DoG blob detector on `log I` (σ 3.5 µm, ratio 1.6) | 33 |
+| `tissue` | ≥ 30 µm/px (pyramid L4–L5) | smoothed log-intensity (nuclear-density proxy) vs. tile-global mean, via a global attention head → bg / gray / white scores | 32 |
+| `layers` | 8.5–30 µm/px (run at L5, ~82 µm voxels, 64-voxel tiles) | density indicators → pia and white-matter proximity (bg / WM indicators smoothed by Gaussian attention at 150/400/900 µm) → signed depth `s` → soft ReLU bands for layers I–VI, edges computed from declared depths in µm, gated by tissue-and-not-WM | 313 |
+| `cells` | < 8.5 µm/px, run at 2.6 µm (L0) | DoG blob detector on `log I` (σ 3.5 µm, ratio 1.6) | 33 |
 | `vessels_13dir`, `vessels_26dir` | 2.6 µm (L0) | max over oriented elongated Gaussians (σ_l 8 µm, σ_t 2 µm) minus a wide background | 330 / 642 |
 
 Sizes are *nonzero* weights; dense tensors are larger (`scripts/export_models.py` prints both). Model size is a
@@ -40,27 +41,47 @@ F1: 13 dirs 0.79, 26 dirs 0.86, 49 dirs 0.90).
 ## Evidence, and what it does not show
 
 * **Programmed attention = its specification** (unit test, exact), **fast FFT path = dense attention** (1e-7), and
-  **JS engine and WebGPU engine = Python** on golden volumes (≤ 1e-4; tissue, cells, vessels; `demo/test/golden.json`).
+  **JS engine and WebGPU engine = Python** on golden volumes (≤ 1e-4; tissue, layers, cells, vessels; `demo/test/golden.json`).
 * **Synthetic phantoms with exact ground truth** (`hwseg.phantom`): cells and vessels with Poisson + multiplicative
   noise. `tests/` requires F1 > 0.5 for both programs at the calibrated contrast.
 * **Real streamed crops** (`scripts/stream_smoke.py`): cells and vessels land on visible nuclei and vessel walls in
   YO/NN and LEC slabs. **No ground-truth labels ship with 000108, so there are no real-data accuracy numbers.**
-* **Not validated:** the `tissue` gray/white split. On real crops it separates background from tissue but labels
-  almost all tissue "white", and because it calibrates against each tile's own statistics, tile seams are visible, cortical **layers** (not implemented; mid zoom shows tissue scale),
-  and cross-slab robustness beyond a handful of slabs. Thresholds (`tau`, `k_bg`, `k_gm`) are declared design
-  constants calibrated on phantoms, not fitted per slab. Vessel programs belong to LEC/CD31 stains; on nuclear
-  stains they respond to cell bodies.
+* **`layers` is the weakest program.** On a synthetic cortical ribbon (`make_cortex_phantom`) it is depth-ordered and
+  within one layer for >85% of cortex voxels (exact-layer accuracy is about 0.5; edges blur by design). On real crops
+  it is **not trustworthy**: the declared depth priors assume a perpendicular section through a flat ribbon, the
+  real slabs are oblique cuts, and large-scale white-matter signal dominates the depth proxy, so most tissue lands in
+  L5/L6/WM and layers I-IV are nearly empty. Calibrating it needs layer labels (manual annotation or atlas
+  registration), which DANDI 000108 does not ship.
+* **Tissue v2** (density relative to the tile mean) separates dark white matter from brighter gray on real crops far
+  better than v1 (which labeled almost everything white), but it calibrates against each tile's own statistics, so
+  tile seams are visible.
+* **Not validated:** cross-slab robustness beyond a handful of slabs, and everything on real data (no labels).
+  Thresholds (`tau`, `k_bg`, `k_gm`, layer depth priors) are declared design constants calibrated on phantoms or
+  anatomy priors, not fitted per slab. Vessel programs belong to LEC/CD31 stains; on nuclear stains they respond to
+  cell bodies.
 
 ## Streaming, no bulk download
 
 `hwseg.data.StreamedZarr` and the demo read only the zarr chunks a crop intersects (HTTP GET per chunk from the
 DANDI S3 bucket) and decode them; an optional disk cache is hard-capped. Nothing downloads whole volumes.
 
-## Demo: WebGPU viewer
+## Demo: WebGPU viewer and slab gallery
+
+Live: https://sensein.group/handwired-brain-transformer/ (GitHub Pages, branch `gh-pages`; redeploy with
+`scripts/deploy_pages.sh`). If the custom domain is unavailable use
+https://sensein.github.io/handwired-brain-transformer/.
+
+* **Viewer** (`index.html`): pick a slab and pan/zoom; models follow the zoom.
+* **Slab gallery** (`slabs.html`): one column per slab, one row per stain (YO / NN / LEC), a pyramid-level selector
+  that drives the model choice, per-cell stats (class fractions, cells/mm² in the plane, vessel area) and a CSV
+  export. Each cell streams a window at the brightest tissue location of that slab and links into the viewer.
+
+Zoom routing (µm per screen pixel `p`): `p ≥ 30` tissue; `8.5 ≤ p < 30` layers; `p < 8.5` cells (YO/NN/other stains) or vessels (LEC/CD31).
 
 ```bash
 python -m http.server -d demo 8000     # then open http://localhost:8000 in a WebGPU browser
 ```
+(or use the Pages link above)
 
 * Streams OME-Zarr chunks straight from DANDI S3 in the browser (own blosc/zstd decoder, `demo/blosc.js`).
 * Pick stain / slab / chunk / plane; pan and zoom.

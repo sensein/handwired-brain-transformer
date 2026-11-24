@@ -13,7 +13,7 @@ const browser = await chromium.launch({ args, headless: true });
 const page = await browser.newPage();
 page.on('console', (m) => console.log('[page]', m.text()));
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
-await page.goto('http://localhost:8123/');
+await page.goto('http://localhost:8123/test/blank.html');
 const res = await page.evaluate(async () => {
   const E = await import('/engine.js');
   let eng; try { eng = await E.GPUEngine.create(); } catch (e) { return { error: String(e) }; }
@@ -21,7 +21,7 @@ const res = await page.evaluate(async () => {
   const out = {};
   for (const [name, g] of Object.entries(gold)) {
     const prog = E.parseProgram(await (await fetch(`/models/${name}.json`)).text());
-    const [Z, Y, X] = g.dims, zc = name === 'tissue' ? 6 : 7;
+    const [Z, Y, X] = g.dims, zc = name === 'tissue' ? 6 : name === 'layers' ? 4 : 7;
     const r = await eng.run(prog, Float32Array.from(g.logI), g.dims, g.spacing, zc);
     for (const [k, ref] of Object.entries(g.out)) {
       let md = 0, mx = 0;
