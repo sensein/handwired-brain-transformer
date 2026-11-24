@@ -126,13 +126,35 @@ def _local_attn(v, q, k, r, valid):
     return out
 
 
+def _fast_attn(v, h: Head, spacing, r):
+    """Exact equivalent of _local_attn for Gaussian heads: P and delta are read back from the head's own
+    Q/K weights; normalized FFT correlation == masked softmax at borders. (Tested against dense path.)"""
+    P = h.Wq[:3, 1:4]
+    delta = np.linalg.solve(P, h.Wq[:3, CH_ONE])
+    sh = [int(round(delta[a] / spacing[a])) for a in range(3)]  # shifts are voxel-aligned by construction
+    g = np.meshgrid(*[np.arange(-ri, ri + 1) * s for ri, s in zip(r, spacing)], indexing="ij")
+    ker = np.exp(-0.5 * sum(P[a, b] * (g[a] - delta[a]) * (g[b] - delta[b]) for a in range(3) for b in range(3)))
+    ker = torch.as_tensor(ker / ker.sum(), dtype=v.dtype)
+    fs = [v.shape[i] + ker.shape[i] - 1 for i in range(3)]
+    fs = [int(2 ** np.ceil(np.log2(n))) for n in fs]
+    def corr(a):
+        A = torch.fft.rfftn(a, s=fs)
+        K = torch.fft.rfftn(torch.flip(ker, (0, 1, 2)), s=fs)
+        o = torch.fft.irfftn(A * K, s=fs)
+        return o[tuple(slice(r[i] * 1 + r[i] * 0, r[i] + a.shape[i]) for i in range(3))]
+    num = corr(v)
+    den = corr(torch.ones_like(v))
+    return num / den.clamp_min(1e-12)
+
+
 class WiredTransformer:
-    def __init__(self, prog: Program, dtype=torch.float64):
-        self.p, self.dtype = prog, dtype
+    def __init__(self, prog: Program, dtype=torch.float64, fast=True):
+        self.p, self.dtype, self.fast = prog, dtype, fast
 
     @torch.no_grad()
     def forward(self, logI: torch.Tensor, spacing) -> dict[str, torch.Tensor]:
         d = self.p.d
+        logI = torch.as_tensor(logI)
         x = embed(logI, spacing, d, self.dtype)
         valid = torch.ones(logI.shape, dtype=self.dtype)
         T = lambda a: torch.as_tensor(a, dtype=self.dtype)  # noqa: E731
@@ -144,9 +166,12 @@ class WiredTransformer:
                     o = v.mean().expand_as(v)
                 else:
                     r = tuple(max(1, int(np.ceil(rr / s))) for rr, s in zip(h.radius_um, spacing))
-                    q = torch.einsum("ac,czyx->azyx", T(h.Wq), x)
-                    k = torch.einsum("ac,czyx->azyx", T(h.Wk), x)
-                    o = _local_attn(v, q, k, r, valid)
+                    if self.fast:
+                        o = _fast_attn(v, h, spacing, r)
+                    else:
+                        q = torch.einsum("ac,czyx->azyx", T(h.Wq), x)
+                        k = torch.einsum("ac,czyx->azyx", T(h.Wk), x)
+                        o = _local_attn(v, q, k, r, valid)
                 delta += T(h.Wo)[:, None, None, None] * o
             x = x + delta
             if L.mlp is not None:

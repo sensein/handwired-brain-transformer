@@ -4,11 +4,10 @@ version = "0.1.0"
 description = "Weight-space-programmed (no gradient descent) 3D volumetric transformers for multiscale brain segmentation (DANDI 000108)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
-dependencies = ["numpy", "scipy", "torch", "zarr>=2.18,<3", "fsspec", "aiohttp", "requests", "numcodecs"]
+dependencies = ["numpy", "scipy", "torch", "zarr>=2.18,<3", "fsspec", "aiohttp", "requests", "numcodecs<0.16"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "matplotlib"]
 
 [build-system]
 requires = ["hatchling"]

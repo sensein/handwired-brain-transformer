@@ -45,3 +45,12 @@ def test_vessels_program_prefers_tubes():
     vol, c, v, sp = make_phantom(seed=4, n_cells=20, n_vessels=3, fg=800.0, cell_r_um=4.0)
     out = WiredTransformer(vessels(), dtype=torch.float32).forward(torch.log(torch.as_tensor(vol) + 1), sp)
     assert _f1(out["seg"].numpy() > 0.5, v) > 0.5
+
+
+def test_fast_path_equals_dense_attention_for_programs():
+    vol, c, v, sp = make_phantom(shape=(20, 24, 24), seed=5, n_cells=6, n_vessels=2, fg=800.0)
+    L = torch.log(torch.as_tensor(vol) + 1)
+    for prog in (cells(), vessels(n_dirs=6)):
+        a = WiredTransformer(prog, torch.float64, fast=False).forward(L, sp)["score"]
+        b = WiredTransformer(prog, torch.float64, fast=True).forward(L, sp)["score"]
+        assert torch.allclose(a, b, atol=1e-7), (prog.name, (a - b).abs().max().item())

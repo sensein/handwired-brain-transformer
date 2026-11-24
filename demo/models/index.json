@@ -1,0 +1,34 @@
+{
+ "tissue": {
+  "file": "tissue.json",
+  "kind": "tissue",
+  "dense": 1087,
+  "nonzero": 53,
+  "heads": 4,
+  "layers": 4
+ },
+ "cells": {
+  "file": "cells.json",
+  "kind": "cells",
+  "dense": 393,
+  "nonzero": 33,
+  "heads": 2,
+  "layers": 2
+ },
+ "vessels_13dir": {
+  "file": "vessels_13dir.json",
+  "kind": "vessels",
+  "dense": 4605,
+  "nonzero": 330,
+  "heads": 14,
+  "layers": 7
+ },
+ "vessels_26dir": {
+  "file": "vessels_26dir.json",
+  "kind": "vessels",
+  "dense": 13068,
+  "nonzero": 642,
+  "heads": 27,
+  "layers": 8
+ }
+}
