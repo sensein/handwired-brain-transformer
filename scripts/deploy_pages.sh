@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE="$(git -C "$ROOT" remote get-url origin)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-cp -r "$ROOT/demo/." "$T/" && rm -rf "$T/test" && touch "$T/.nojekyll"
+"$ROOT/scripts/assemble_pages.sh" "$T"
 cd "$T" && git init -q -b gh-pages && git add -A
 git -c user.name="$(git -C "$ROOT" config user.name)" -c user.email="$(git -C "$ROOT" config user.email)" commit -q -m "Deploy demo from $(git -C "$ROOT" rev-parse --short HEAD)"
 git push -q --force "$REMOTE" gh-pages

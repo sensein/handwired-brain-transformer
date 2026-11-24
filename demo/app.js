@@ -1,6 +1,7 @@
 import { parseProgram, nParams, haloFor, GPUEngine, runCPU } from './engine.js';
 import { Zarr, Slab, clamp, S3 } from './zarr.js';
 import { banner } from './banner.js';
+import { ngState } from './ng-state.js';
 import { VolumeView } from './volume.js';
 import { FAMILIES, familyForZoom, scaledModel, scaleLabel } from './route.js';
 import { MULTI, MULTI_COLORS, recommendExposure, segVolume, labelVolume, paletteFor, segRegion, renderSegCanvas, regionStats, toCanvas, COLORS, IDENT, isIdent, adjustU, adjustLogVol, percentileWindow } from './seg.js';
@@ -62,6 +63,11 @@ $('opacity').oninput = () => draw();
 $('z').oninput = () => { view.z = +$('z').value; $('zval').textContent = view.z; draw(); schedule(); };
 $('reset').onclick = () => jumpToTissue();
 $('fit').onclick = () => zarr && fitView();
+$('ngopen').onclick = () => {   // the same slab, position, zoom and model-recommended exposure in our hosted Neuroglancer
+  if (!zarr) return; const L0 = zarr.levels[0], ids = zarr.ids || [new URL(zarr.base).pathname.split('/').filter(Boolean).pop()];
+  const st = ngState(ids, { sp: L0.sp, off: zarr.ids ? L0.origin : L0.tr }, view, rec);
+  window.open('ng/index.html#!' + encodeURIComponent(JSON.stringify(st)), '_blank');
+};
 function readAdj() { adj.b = +$('bri').value; adj.c = +$('con').value; adj.g = +$('gam').value; $('brival').textContent = adj.b.toFixed(2); $('conval').textContent = adj.c.toFixed(2); $('gamval').textContent = adj.g.toFixed(2); }
 for (const id of ['bri', 'con', 'gam']) $(id).oninput = () => { readAdj(); repaintRaw(); invalidateSeg(); schedule(dbn.delay + 250); };   // the model sees the display image, so it re-runs, after a longer settle
 $('autoexp').onchange = () => { repaintRaw(); invalidateSeg(); schedule(); };

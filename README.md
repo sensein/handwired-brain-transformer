@@ -106,7 +106,14 @@ axis, not a trained outcome: for vessels, direction count trades accuracy for si
   annotation layer with ellipsoids persisted when it declared its own `(z, y, x)` output space (the viewer space is
   `(t, z, y, x)`; a 3-D annotation in the wrong space is silently dropped). Hooking it from our own page needs our own
   build (same-origin); the Python wheel's bundled client is the Python-integration build and cannot be hosted standalone.
-  GitHub Pages can host such a build (built in CI); that is not set up here.
+  Our own build is hosted on Pages under `/ng/` (`scripts/build_neuroglancer.sh` builds the pinned commit, Node >= 22.18;
+  `scripts/assemble_pages.sh` adds it with `demo/ng-hook.js` injected; the build is not committed to `main`). The hook
+  reads the view (the FOV is recovered from the data coordinates Neuroglancer reports under the panel corners), runs the
+  programmed model on exactly that FOV with the WebGPU engine, and writes the detections back as an annotation layer; the
+  image layer uses a shader that reproduces our display pipeline (log window from the exposure program, contrast,
+  brightness, gamma sliders). Hard-won specifics: the annotation layer must be declared in the viewer's own (t, z, y, x)
+  space (any other space reorders the global dimensions and resets the view); `restoreState` alone leaves a broken display
+  plane, so the hook calls `state.reset()` first. `demo/test/ng_bridge_test.mjs` is the end-to-end test.
 
 ## Hand-written weights (`weights/fable/`)
 
