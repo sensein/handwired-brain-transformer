@@ -23,10 +23,12 @@ export const percentileWindow = (v, p0 = 0.02, p1 = 0.997) => { const s = Float3
 export async function segRegion(zarr, engine, prog, level, zl, y0, y1, x0, x1, adjustFn = null, opts = {}) {
   const L = zarr.levels[level], sp = L.sp; let [hz, hy, hx] = haloFor(prog, sp);
   if (opts.halo === false) { hy = 0; hx = 0; }
+  if (opts.onStage) opts.onStage('fetch');
   const zs = Math.max(0, zl - hz), ze = Math.min(L.shape[0], zl + hz + 1), ys = Math.max(0, y0 - hy), ye = Math.min(L.shape[1], y1 + hy), xs = Math.max(0, x0 - hx), xe = Math.min(L.shape[2], x1 + hx);
   let vol = await zarr.crop(level, zs, ze, ys, ye, xs, xe);
   if (adjustFn) vol = adjustFn(vol);
   const dims = [ze - zs, ye - ys, xe - xs], zc = zl - zs, pl = dims[1] * dims[2];
+  if (opts.onStage) opts.onStage('run');
   let out;
   if (engine) out = await engine.run(prog, vol, dims, sp, zc);
   else {

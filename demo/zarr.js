@@ -9,14 +9,15 @@ export class Limiter { constructor(n) { this.n = n; this.q = []; this.run = 0; }
     try { return await fn(); } finally { this.run--; const r = this.q.shift(); if (r) r(); } } }
 
 export class Zarr {
-  constructor(id) { this.base = S3 + id; this.cache = new Map(); this.bytes = 0; this.net = 0; this.lim = new Limiter(8); this.inflight = new Map(); }
+  constructor(id) { this.stat = { inflight: 0, chunks: 0, bytes: 0 }; this.base = S3 + id; this.cache = new Map(); this.bytes = 0; this.net = 0; this.lim = new Limiter(8); this.inflight = new Map(); }
   async init() {
     const attrs = await (await fetch(this.base + '/.zattrs')).json();
     const ds = attrs.multiscales[0].datasets;
     this.levels = await Promise.all(ds.map(async (d) => {
       const za = await (await fetch(`${this.base}/${d.path}/.zarray`)).json();
       const sc = d.coordinateTransformations.find((t) => t.type === 'scale').scale.slice(-3);
-      return { path: d.path, shape: za.shape.slice(-3), chunks: za.chunks.slice(-3), sp: sc };
+      const tr = (d.coordinateTransformations.find((t) => t.type === 'translation') || { translation: [0, 0, 0, 0, 0] }).translation.slice(-3);
+      return { path: d.path, shape: za.shape.slice(-3), chunks: za.chunks.slice(-3), sp: sc, tr };
     }));
     this.top = this.levels.length - 1;
   }
@@ -25,6 +26,7 @@ export class Zarr {
     if (hit) { this.cache.delete(key); this.cache.set(key, hit); return Promise.resolve(hit); }
     if (this.inflight.has(key)) return this.inflight.get(key);
     const L = this.levels[l], n = L.chunks[0] * L.chunks[1] * L.chunks[2];
+    this.stat.inflight++;
     const p = this.lim.go(async () => {
       let arr;
       try {
@@ -38,7 +40,7 @@ export class Zarr {
       } catch (e) { arr = new Uint16Array(n); }
       this.cache.set(key, arr); this.bytes += arr.byteLength;
       for (const [k, v] of this.cache) { if (this.bytes < 700e6) break; this.cache.delete(k); this.bytes -= v.byteLength; }
-      this.inflight.delete(key);
+      this.inflight.delete(key); this.stat.inflight--; this.stat.chunks++; this.stat.bytes = this.net;
       return arr;
     });
     this.inflight.set(key, p);
@@ -64,3 +66,53 @@ export class Zarr {
   }
 }
 
+
+
+// A slab = several strips (chunks) stacked along y with ~0.8 mm overlap; each zarr stores its physical translation (um).
+// Slab places every strip by that translation (what Neuroglancer does with a multi-source layer), blends overlaps with a
+// feathered average along y, and exposes the same interface as Zarr (levels, top, crop, stat, net, bytes, base).
+export class Slab {
+  constructor(ids) { this.members = ids.map((id) => new Zarr(id)); this.base = `slab:${ids[0]}+${ids.length}`; this.ids = ids; }
+  get stat() { const t = { inflight: 0, chunks: 0, bytes: 0 }; for (const m of this.members) { t.inflight += m.stat.inflight; t.chunks += m.stat.chunks; t.bytes += m.stat.bytes; } return t; }
+  get net() { return this.members.reduce((a, m) => a + m.net, 0); }
+  get bytes() { return this.members.reduce((a, m) => a + m.bytes, 0); }
+  async init() {
+    await Promise.all(this.members.map((m) => m.init()));
+    // A strip that covers most of an earlier strip's y-range is a re-acquisition, not a neighbour (neighbours overlap ~10%):
+    // averaging two scans with different illumination makes a band, so keep the first and list the rest as dropped.
+    const top0 = this.members[0].levels[this.members[0].levels.length - 1], yr = (m) => { const L = m.levels[m.levels.length - 1]; return [L.tr[1], L.tr[1] + L.shape[1] * L.sp[1]]; };
+    const keep = [], dropped = [];
+    this.members.forEach((m, i) => {
+      const [a0, a1] = yr(m), dup = keep.find((k) => { const [b0, b1] = yr(this.members[k]); return Math.min(a1, b1) - Math.max(a0, b0) > 0.5 * Math.min(a1 - a0, b1 - b0); });
+      (dup === undefined ? keep : dropped).push(i);
+    });
+    this.dropped = dropped.map((i) => this.ids[i]); this.members = keep.map((i) => this.members[i]); this.ids = keep.map((i) => this.ids[i]); void top0;
+    const nl = Math.min(...this.members.map((m) => m.levels.length)); this.top = nl - 1; this.levels = [];
+    for (let l = 0; l < nl; l++) {
+      const sp = this.members[0].levels[l].sp, org = [0, 1, 2].map((a) => Math.min(...this.members.map((m) => m.levels[l].tr[a])));
+      const end = [0, 1, 2].map((a) => Math.max(...this.members.map((m) => m.levels[l].tr[a] + m.levels[l].shape[a] * sp[a])));
+      const offs = this.members.map((m) => [0, 1, 2].map((a) => Math.round((m.levels[l].tr[a] - org[a]) / sp[a])));
+      this.levels.push({ path: 'slab', shape: [0, 1, 2].map((a) => Math.ceil((end[a] - org[a]) / sp[a])), chunks: [1, 256, 256], sp, origin: org, offs });
+    }
+  }
+  async crop(level, z0, z1, y0, y1, x0, x1) {
+    const L = this.levels[level], n = (z1 - z0) * (y1 - y0) * (x1 - x0), out = new Float32Array(n), wsum = new Float32Array(n);
+    const feather = Math.max(2, Math.round(780 / L.sp[1])), jobs = [];
+    this.members.forEach((m, i) => {
+      const o = L.offs[i], sh = m.levels[level].shape;
+      const b = [Math.max(0, z0 - o[0]), Math.min(sh[0], z1 - o[0]), Math.max(0, y0 - o[1]), Math.min(sh[1], y1 - o[1]), Math.max(0, x0 - o[2]), Math.min(sh[2], x1 - o[2])];
+      if (b[1] <= b[0] || b[3] <= b[2] || b[5] <= b[4]) return;
+      jobs.push(m.crop(level, b[0], b[1], b[2], b[3], b[4], b[5]).then((sub) => ({ sub, b, o, sh })));
+    });
+    for (const { sub, b, o, sh } of await Promise.all(jobs)) {
+      const dz = b[1] - b[0], dy = b[3] - b[2], dx = b[5] - b[4];
+      for (let z = 0; z < dz; z++) for (let y = 0; y < dy; y++) {
+        const ly = b[2] + y, w = Math.max(1e-3, Math.min(1, Math.min(ly + 1, sh[1] - ly) / feather));
+        let src = (z * dy + y) * dx, dst = ((b[0] + o[0] + z - z0) * (y1 - y0) + (ly + o[1] - y0)) * (x1 - x0) + (b[4] + o[2] - x0);
+        for (let x = 0; x < dx; x++, src++, dst++) { out[dst] += w * sub[src]; wsum[dst] += w; }
+      }
+    }
+    for (let i = 0; i < n; i++) out[i] = wsum[i] > 0 ? out[i] / wsum[i] : 0;
+    return out;
+  }
+}

@@ -6,10 +6,10 @@ while url:
     for r in d["results"]:
         if not r["path"].endswith(".ome.zarr") or not r.get("zarr"):
             continue
-        m = re.search(r"sub-(\w+?)/.*sample-(\w+?)_stain-(\w+?)_run-\d+_chunk-(\d+)", r["path"])
+        m = re.search(r"sub-(\w+?)/ses-(\w+?)/.*sample-(\w+?)_stain-(\w+?)_run-\d+_chunk-(\d+)", r["path"])
         if m:
-            out.append(dict(zarr=r["zarr"], sub=m[1], sample=m[2], stain=m[3], chunk=int(m[4])))
+            out.append(dict(zarr=r["zarr"], sub=m[1], session=m[2], sample=m[3], stain=m[4], chunk=int(m[5])))
     url = d["next"]
-out.sort(key=lambda r: (r["stain"], r["sample"], r["chunk"]))
+out.sort(key=lambda r: (r["stain"], r["sample"], r["session"], r["chunk"]))
 json.dump(out, open(sys.argv[1], "w"), separators=(",", ":"))
 print(len(out), "zarrs", {s: sum(r["stain"] == s for r in out) for s in {r["stain"] for r in out}})

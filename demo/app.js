@@ -1,5 +1,6 @@
 import { parseProgram, nParams, haloFor, GPUEngine, runCPU } from './engine.js';
-import { Zarr, clamp, S3 } from './zarr.js';
+import { Zarr, Slab, clamp, S3 } from './zarr.js';
+import { banner } from './banner.js';
 import { VolumeView } from './volume.js';
 import { FAMILIES, familyForZoom, scaledModel, scaleLabel } from './route.js';
 import { MULTI, MULTI_COLORS, recommendExposure, segVolume, labelVolume, paletteFor, segRegion, renderSegCanvas, regionStats, toCanvas, COLORS, IDENT, isIdent, adjustU, adjustLogVol, percentileWindow } from './seg.js';
@@ -17,9 +18,11 @@ async function getProgram(name) { return programs[name] ||= parseProgram(await (
 
 let engine = null, backend = 'none';
 try { engine = await GPUEngine.create(); backend = 'WebGPU'; } catch (e) { backend = 'CPU reference (no WebGPU: slow, small tiles only)'; }
+banner.log('compute backend: ' + backend);
 
 const view = { cx: 0, cy: 0, p: 100, z: 1024 };       // center in um (x,y); um per screen pixel; level-0 z index
 let zarr = null, stain = '', winByLevel = {}, gen = 0;
+banner.init(); banner.setStream(() => (zarr ? zarr.stat : null));
 const rawTiles = new Map(), segTiles = new Map(), segStats = new Map();
 const cv = $('cv'), ctx = cv.getContext('2d');
 
@@ -32,12 +35,24 @@ for (const s of [...new Set(assets.map((a) => a.stain))].sort((a, b) => (['YO', 
 $('model').add(new Option('Auto (follows zoom)', 'auto'));
 for (const k of Object.keys(modelIndex)) if (modelIndex[k].scale === 1 && modelIndex[k].kind !== 'exposure') $('model').add(new Option(`${MODEL_LABEL[k] || k} - ${modelIndex[k].nonzero} params`, k));
 $('model').add(new Option('None (raw only)', 'none'));
+const sel = () => assets.filter((a) => a.stain === $('stain').value && a.sample === $('sample').value && (!$('session').value || a.session === $('session').value));
 function fillSamples() { const ss = [...new Set(assets.filter((a) => a.stain === $('stain').value).map((a) => a.sample))].sort((a, b) => +a - +b);
-  $('sample').innerHTML = ''; ss.forEach((s) => $('sample').add(new Option('sample ' + s, s))); fillChunks(); }
-function fillChunks() { const cs = assets.filter((a) => a.stain === $('stain').value && a.sample === $('sample').value).sort((a, b) => a.chunk - b.chunk);
-  $('chunk').innerHTML = ''; cs.forEach((a) => $('chunk').add(new Option('chunk ' + a.chunk, a.zarr))); }
+  $('sample').innerHTML = ''; ss.forEach((v) => $('sample').add(new Option('sample ' + v, v))); fillSessions(); }
+function fillSessions() { const ss = [...new Set(assets.filter((a) => a.stain === $('stain').value && a.sample === $('sample').value).map((a) => a.session))].sort();
+  $('session').innerHTML = ''; ss.forEach((v) => $('session').add(new Option(`${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)} (${assets.filter((a) => a.stain === $('stain').value && a.sample === $('sample').value && a.session === v).length} strips)`, v))); fillChunks(); }
+function fillChunks() { const cs = sel().sort((a, b) => a.chunk - b.chunk);
+  $('chunk').innerHTML = ''; $('chunk').add(new Option(`whole slab, all ${cs.length} strips stitched`, 'slab')); cs.forEach((a) => $('chunk').add(new Option('strip ' + a.chunk + ' only', a.zarr))); }
 $('stain').onchange = () => { fillSamples(); openAsset(); };
-$('sample').onchange = () => { fillChunks(); openAsset(); };
+// Paste a dashboard / Neuroglancer link: every zarr:// source in its layers becomes the stitched slab to open.
+$('nglink').onchange = () => {
+  let txt = $('nglink').value.trim(); try { txt = decodeURIComponent(txt); } catch (e) { /* keep raw */ }
+  const ids = [...new Set([...txt.matchAll(/dandiarchive\.s3\.amazonaws\.com\/zarr\/([0-9a-f-]{36})/g)].map((m) => m[1]))], hit = ids.map((id) => assets.find((a) => a.zarr === id)).filter(Boolean);
+  if (!hit.length) { banner.log('no known DANDI 000108 zarr sources found in that link', 'error'); setStatus('No known zarr sources found in that link.', true); return; }
+  banner.log(`link: ${ids.length} zarr sources, ${hit.length} known; opening ${hit[0].stain} sample ${hit[0].sample} stitched`);
+  selectAsset(hit[0], true); openAsset();
+};
+$('sample').onchange = () => { fillSessions(); openAsset(); };
+$('session').onchange = () => { fillChunks(); openAsset(); };
 $('chunk').onchange = () => openAsset();
 $('model').onchange = $('fscale').onchange = () => { invalidateSeg(); schedule(); };
 $('debounce').oninput = () => { dbn.delay = +$('debounce').value; $('debval').textContent = dbn.delay; };
@@ -46,6 +61,7 @@ $('segrun').onclick = () => { clearTimeout(dbn.timer); gen++; dbn.chain = dbn.ch
 $('opacity').oninput = () => draw();
 $('z').oninput = () => { view.z = +$('z').value; $('zval').textContent = view.z; draw(); schedule(); };
 $('reset').onclick = () => jumpToTissue();
+$('fit').onclick = () => zarr && fitView();
 function readAdj() { adj.b = +$('bri').value; adj.c = +$('con').value; adj.g = +$('gam').value; $('brival').textContent = adj.b.toFixed(2); $('conval').textContent = adj.c.toFixed(2); $('gamval').textContent = adj.g.toFixed(2); }
 for (const id of ['bri', 'con', 'gam']) $(id).oninput = () => { readAdj(); repaintRaw(); invalidateSeg(); schedule(dbn.delay + 250); };   // the model sees the display image, so it re-runs, after a longer settle
 $('autoexp').onchange = () => { repaintRaw(); invalidateSeg(); schedule(); };
@@ -99,21 +115,23 @@ function paintRaw(lg, w, h, win) {
   return toCanvas(null, w, h, (px) => { const r = win[1] - win[0];
     for (let i = 0; i < w * h; i++) { const v = adjustU(clamp((lg[i] - win[0]) / r, 0, 1), effAdj()) * 255; px[4 * i] = px[4 * i + 1] = px[4 * i + 2] = v; px[4 * i + 3] = 255; } });
 }
-function rawTile(l, zl, cy, cx) {
+const RT = 256;   // raw display tile size (voxels)
+function rawTile(l, zl, ty, tx) {
   const n = +$('depth').value, mode = $('dmode').value;
-  const key = `${zarr.base}|${l}|${zl}|${cy}|${cx}|${n}|${mode}`, hit = rawTiles.get(key);
+  const key = `${zarr.base}|${l}|${zl}|${ty}|${tx}|${n}|${mode}`, hit = rawTiles.get(key);
   if (hit) return hit.c;
   if (hit === null) return null;
   rawTiles.set(key, null);
-  const L = zarr.levels[l], [cz, cyS, cxS] = L.chunks, half = (n - 1) >> 1, planes = [];
-  for (let k = zl - half; k <= zl + half; k++) if (k >= 0 && k < L.shape[0]) planes.push(k);
-  Promise.all(planes.map((k) => zarr.chunk(l, Math.floor(k / cz), cy, cx).then((data) => ({ k, data })))).then((ps) => {
-    const lg = new Float32Array(cxS * cyS).fill(mode === 'max' ? -Infinity : 0);
-    for (const { k, data } of ps) { const base = ((k % cz) * cyS) * cxS;
-      for (let i = 0; i < lg.length; i++) { const v = Math.log(data[base + i] + 1); lg[i] = mode === 'max' ? (v > lg[i] ? v : lg[i]) : lg[i] + v; } }
-    if (mode !== 'max') for (let i = 0; i < lg.length; i++) lg[i] /= ps.length;
+  const L = zarr.levels[l], half = (n - 1) >> 1, z0 = Math.max(0, zl - half), z1 = Math.min(L.shape[0], zl + half + 1);
+  const y0 = ty * RT, y1 = Math.min(L.shape[1], y0 + RT), x0 = tx * RT, x1 = Math.min(L.shape[2], x0 + RT), w = x1 - x0, h = y1 - y0;
+  if (w <= 0 || h <= 0 || z1 <= z0) return null;
+  const base = zarr.base;
+  zarr.crop(l, z0, z1, y0, y1, x0, x1).then((v) => {
+    if (zarr.base !== base) return;
+    const lg = new Float32Array(w * h), pl = w * h, np = z1 - z0;
+    for (let i = 0; i < pl; i++) { let acc = mode === 'max' ? -Infinity : 0; for (let k = 0; k < np; k++) { const x = v[k * pl + i]; acc = mode === 'max' ? (x > acc ? x : acc) : acc + x; } lg[i] = mode === 'max' ? acc : acc / np; }
     if (!winByLevel[l]) winByLevel[l] = percentileWindow(lg);
-    rawTiles.set(key, { c: paintRaw(lg, cxS, cyS, currentWin(l)), lg, w: cxS, h: cyS, l });
+    rawTiles.set(key, { c: paintRaw(lg, w, h, currentWin(l)), lg, w, h, l });
     if (rawTiles.size > 900) rawTiles.delete(rawTiles.keys().next().value); draw();
   });
   return null;
@@ -141,7 +159,7 @@ function draw() {
   const W = cv.width, H = cv.height;
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H); ctx.imageSmoothingEnabled = false;
   const l = rawLevel(), zl = clamp(Math.floor(view.z / 2 ** l), 0, zarr.levels[l].shape[0] - 1);
-  drawGrid(l, (gy, gx) => rawTile(l, zl, gy, gx), 1, zarr.levels[l].chunks[1], zarr.levels[l].chunks[2]);
+  drawGrid(l, (gy, gx) => rawTile(l, zl, gy, gx), 1, RT, RT);
   const r = curRoute;
   if (r && fovSeg && fovSeg.model === r.model) {   // one forward pass over the visible region
     { const f = fovSeg, sp = zarr.levels[f.level].sp, x0 = view.cx - W / 2 * view.p, y0 = view.cy - H / 2 * view.p;
@@ -168,10 +186,12 @@ function schedule(delay) {
   clearTimeout(dbn.timer);
   const d = delay ?? dbn.delay;
   if ($('segauto').checked && curRoute && curRoute.model !== 'none') setStatus(`view changed: segmentation runs ${d} ms after you stop`);
+  banner.setPending($('segauto').checked && curRoute && curRoute.model !== 'none' ? d : 0);
   dbn.timer = setTimeout(fire, d);
 }
 function fire() {
   if (dbn.interacting > 0) { dbn.timer = setTimeout(fire, 120); return; }   // never while dragging
+  banner.setPending(0);
   dbn.chain = dbn.chain.then(() => refresh()).catch((e) => console.error(e)); // serialized: never two GPU jobs at once
 }
 
@@ -201,8 +221,13 @@ async function refreshFov(prog, r, myGen, local = false) {
   const L = zarr.levels[level], zl = clamp(Math.floor(view.z / 2 ** level), 0, L.shape[0] - 1), t0 = performance.now();
   counts.fov++;
   const ea = effAdj();
-  const seg = await segRegion(zarr, engine, prog, level, zl, box[0], box[1], box[2], box[3], (v) => { const w = viewWin(v); return adjustLogVol(v, w[0], w[1], ea); }, { halo: false });
-  if (myGen !== gen) return true;
+  const bt = banner.start('infer', `${r.model} · FOV ${box[3] - box[2]}x${box[1] - box[0]} voxels · level ${level}`);
+  let seg;
+  try {
+    seg = await segRegion(zarr, engine, prog, level, zl, box[0], box[1], box[2], box[3], (v) => { const w = viewWin(v); return adjustLogVol(v, w[0], w[1], ea); }, { halo: false, onStage: (st) => banner.update(bt, { detail: st === 'fetch' ? 'fetching the volume' : 'running the model' }) });
+  } catch (e) { banner.finish(bt, false, e.message); throw e; }
+  if (myGen !== gen) { banner.finish(bt, true, 'superseded by a newer view'); return true; }
+  banner.finish(bt, true);
   const stats = regionStats(r.kind, seg, L.sp);
   fovSeg = { model: r.model, level, c: renderSegCanvas(r.kind, seg), y0: box[0], x0: box[2], w: box[3] - box[2], h: box[1] - box[0], stats };
   segStats.clear(); segStats.set(`${zarr.base}|${r.model}|${level}|${zl}|fov`, stats);
@@ -221,7 +246,8 @@ async function updateExposure() {
   const l = rawLevel(), L = zarr.levels[l], W = cv.width, H = cv.height, sp = L.sp, zl = clamp(Math.floor(view.z / 2 ** l), 0, L.shape[0] - 1);
   const y0 = clamp(Math.floor((view.cy - H / 2 * view.p) / sp[1]), 0, L.shape[1] - 1), y1 = clamp(Math.ceil((view.cy + H / 2 * view.p) / sp[1]), y0 + 1, L.shape[1]);
   const x0 = clamp(Math.floor((view.cx - W / 2 * view.p) / sp[2]), 0, L.shape[2] - 1), x1 = clamp(Math.ceil((view.cx + W / 2 * view.p) / sp[2]), x0 + 1, L.shape[2]);
-  try { const r = await recommendExposure(zarr, engine, await getProgram('exposure'), l, zl, y0, y1, x0, x1); rec = { ...r, level: l }; if ($('autoexp').checked) repaintRaw(); } catch (e) { rec = null; }
+  const bt = banner.start('exposure', `Exposure program on the FOV (level ${l})`);
+  try { const r = await recommendExposure(zarr, engine, await getProgram('exposure'), l, zl, y0, y1, x0, x1); rec = { ...r, level: l }; if ($('autoexp').checked) repaintRaw(); banner.finish(bt, true, `window ${r.lo.toFixed(2)}..${r.hi.toFixed(2)}, gamma ${r.gamma.toFixed(2)}`); } catch (e) { rec = null; banner.finish(bt, false, e.message); }
 }
 
 async function refresh(opts = {}) {
@@ -261,15 +287,17 @@ async function refresh(opts = {}) {
   todo.sort((a, b) => a.d - b.d);
   const total = (gx1 - gx0 + 1) * (gy1 - gy0 + 1), batch = todo.slice(0, MAX_TILES);
   let done = total - todo.length, t0 = performance.now();
+  const bt = banner.start('infer', `${r.model} tiles · level ${r.level}`, batch.length);
   for (const t of batch) {
-    if (myGen !== gen) return;
+    if (myGen !== gen) { banner.finish(bt, true, 'superseded by a newer view'); return; }
     try {
       const c = await segTile(prog, r.model, r.level, zl, t.gy, t.gx, fovWin);
-      if (myGen !== gen) return;
-      segTiles.set(segKey(r.model, r.level, zl, t.gy, t.gx), c); if (segTiles.size > 400) segTiles.delete(segTiles.keys().next().value);
-    } catch (e) { setStatus('Tile failed: ' + e.message, true); return; }
+      if (myGen !== gen) { banner.finish(bt, true, 'superseded by a newer view'); return; }
+      segTiles.set(segKey(r.model, r.level, zl, t.gy, t.gx), c); banner.update(bt, { done: banner_done(bt) }); if (segTiles.size > 400) segTiles.delete(segTiles.keys().next().value);
+    } catch (e) { setStatus('Tile failed: ' + e.message, true); banner.finish(bt, false, e.message); return; }
     done++; draw(); setStatus(`${r.model}: ${done}/${total} tiles at level ${r.level} · ${((performance.now() - t0) / (done - (total - todo.length))).toFixed(0)} ms/tile` + (todo.length > MAX_TILES ? ` · ${todo.length - MAX_TILES} more tiles outside the per-refresh budget: pan or zoom to continue` : '') + (r.note ? ' · ' + r.note : ''));
   }
+  banner.finish(bt, true, `${done}/${total} tiles in view`);
   if (myGen === gen) setStatus(`${r.model}: ${done}/${total} tiles at level ${r.level}` + (r.note ? ' · ' + r.note : ''), !!r.note);
 }
 
@@ -280,7 +308,8 @@ function segSummary() {   // mean stats over the segmented tiles of the current 
   for (const [k, st] of segStats) if (k.startsWith(pre)) { n++; for (const [a, b] of Object.entries(st)) acc[a] = (acc[a] || 0) + b; }
   for (const a in acc) acc[a] /= n; return { model: r.model, level: r.level, tiles: n, ...acc };
 }
-function setStatus(t, warn) { const s = $('status'); s.textContent = t; s.className = 'note' + (warn ? ' warn' : ''); }
+let _tileDone = new Map(); const banner_done = (id) => { const n = (_tileDone.get(id) || 0) + 1; _tileDone.set(id, n); return n; };
+function setStatus(t, warn) { if (warn) banner.log(t); const s = $('status'); s.textContent = t; s.className = 'note' + (warn ? ' warn' : ''); }
 function updateInfo(r) {
   const L = zarr.levels[r.level], prog = programs[r.model], np = prog ? nParams(prog) : null;
   const rows = [['Backend', backend], ['Pixel size', view.p.toFixed(2) + ' um/px'], ['Program', r.model === 'none' ? '-' : (MODEL_LABEL[r.family] || r.family)],
@@ -294,7 +323,13 @@ function updateInfo(r) {
 }
 
 // ------------------------------------------------------------------------------------------ asset handling
+function fitView() {   // frame the whole volume (stitched slab or strip)
+  const L = zarr.levels[0], wum = L.shape[2] * L.sp[2], hum = L.shape[1] * L.sp[1];
+  view.p = Math.max(wum / cv.width, hum / cv.height) * 1.04; view.cx = wum / 2; view.cy = hum / 2;
+  draw(); schedule();
+}
 async function jumpToTissue() {
+  const bt = banner.start('scan', 'Scanning the coarsest level for tissue');
   const top = zarr.top, L = zarr.levels[top], a = await zarr.crop(top, 0, L.shape[0], 0, L.shape[1], 0, L.shape[2]);
   const [Z, Y, X] = L.shape, k = 3; let best = -1, bi = [0, 0, 0];
   const sm = new Float32Array(a.length), at = (z, y, x) => a[(z * Y + y) * X + x];
@@ -303,30 +338,38 @@ async function jumpToTissue() {
     if (s > best) { best = s; bi = [z, y, x]; } }
   const f = 2 ** top, sp0 = zarr.levels[0].sp;
   view.cx = bi[2] * f * sp0[2]; view.cy = bi[1] * f * sp0[1]; view.z = clamp(bi[0] * f, 0, zarr.levels[0].shape[0] - 1); view.p = 8;
-  $('z').value = view.z; $('zval').textContent = view.z; draw(); schedule();
+  $('z').value = view.z; $('zval').textContent = view.z; banner.finish(bt, true, `brightest tissue at level ${top}, voxel ${bi.join(',')}`); draw(); schedule();
 }
 
 async function openAsset() {
   const id = $('chunk').value; if (!id) return;
+  const members = id === 'slab' ? sel().sort((a, b) => a.chunk - b.chunk).map((a) => a.zarr) : null;
   setStatus('Opening zarr (metadata only)...'); gen++; rawTiles.clear(); segTiles.clear();
-  const nz = new Zarr(id); await nz.init(); zarr = nz; stain = $('stain').value; curRoute = null;
-  $('z').max = zarr.levels[0].shape[0] - 1;
-  winByLevel = {};
+  const bt = banner.start('open', 'Opening ' + (members ? `the stitched slab (${members.length} strips)` : 'one strip') + ' · ' + $('stain').value + ' sample ' + $('sample').value);
+  try {
+    const nz = members ? new Slab(members) : new Zarr(id); await nz.init(); zarr = nz; stain = $('stain').value; curRoute = null;
+    $('z').max = zarr.levels[0].shape[0] - 1;
+    winByLevel = {};
+    banner.finish(bt, true, `${zarr.levels.length} pyramid levels, level-0 shape ${zarr.levels[0].shape.join('x')}`);
+    if (zarr.dropped && zarr.dropped.length) banner.log(`stitching: ${zarr.dropped.length} strip(s) cover an earlier strip's region (re-acquisition) and are left out; pick "strip N only" to view them`);
+  } catch (e) { banner.finish(bt, false, e.message); throw e; }
   await jumpToTissue();
+  if (members) fitView();     // stitched slabs open at overview zoom
 }
 
 fitCanvas();
 fillSamples();
 const H = new URLSearchParams(location.hash.slice(1));
 const pick = assets.find((a) => a.zarr === H.get('id')) || assets.find((a) => a.stain === 'YO' && a.sample === '90' && a.chunk === 5) || assets[0];
-$('stain').value = pick.stain; fillSamples(); $('sample').value = pick.sample; fillChunks(); $('chunk').value = pick.zarr;
+function selectAsset(a, stitched) { $('stain').value = a.stain; fillSamples(); $('sample').value = a.sample; fillSessions(); $('session').value = a.session; fillChunks(); $('chunk').value = stitched ? 'slab' : a.zarr; }
+selectAsset(pick, H.get('slab') !== '0');
 $('z').value = view.z; $('zval').textContent = view.z;
 await openAsset();
 if (H.get('p')) {   // deep link from the slab gallery: #id=<zarr>&p=<um/px>&cx=<um>&cy=<um>&z=<level-0 plane>
   Object.assign(view, { p: +H.get('p'), cx: +H.get('cx'), cy: +H.get('cy'), z: clamp(+H.get('z'), 0, zarr.levels[0].shape[0] - 1) });
   $('z').value = view.z; $('zval').textContent = view.z; draw(); schedule();
 }
-window.__hw = { counts, dbn, setMaxTiles: (n) => { MAX_TILES = n; }, resetSeg: () => { segTiles.clear(); segStats.clear(); fovSeg = null; document.getElementById('status').textContent = ''; }, segSummary, adj, repaintRaw, segTiles, segStats, view, draw, schedule, get status() { return document.getElementById('status').textContent; }, get route() { return curRoute; } };
+window.__hw = { get zarr() { return zarr; }, fitView, counts, dbn, setMaxTiles: (n) => { MAX_TILES = n; }, resetSeg: () => { segTiles.clear(); segStats.clear(); fovSeg = null; document.getElementById('status').textContent = ''; }, segSummary, adj, repaintRaw, segTiles, segStats, view, draw, schedule, get status() { return document.getElementById('status').textContent; }, get route() { return curRoute; } };
 
 // ------------------------------------------------------------------------------------------ 3D volume view
 let vv = null, last3d = null;
@@ -344,6 +387,10 @@ for (const id of ['bri', 'con', 'gam']) $(id).addEventListener('input', reupload
 $('adjreset').addEventListener('click', reupload3d);
 
 async function build3D() {
+  const bt = banner.start('3d', '3D volume from this view');
+  try { await build3DInner(bt); banner.finish(bt, true); } catch (e) { banner.finish(bt, false, e.message); throw e; }
+}
+async function build3DInner(bt) {
   if (!vv || !zarr) return;
   const cap = +$('v3size').value, nzp = +$('v3depth').value, W = cv.width, H = cv.height;
   const ux0 = view.cx - W / 2 * view.p, ux1 = view.cx + W / 2 * view.p, uy0 = view.cy - H / 2 * view.p, uy1 = view.cy + H / 2 * view.p;
@@ -359,6 +406,7 @@ async function build3D() {
   const z0 = clamp(zl - (nzp >> 1), 0, Math.max(0, L.shape[0] - nzp)), z1 = Math.min(L.shape[0], z0 + nzp);
   if (box[1] <= box[0] || box[3] <= box[2]) { $('v3status').textContent = 'FOV outside the volume'; return; }
   $('v3status').textContent = `Streaming ${box[3] - box[2]}x${box[1] - box[0]}x${z1 - z0} voxels at level ${l}...`;
+  banner.update(bt, { detail: "streaming the volume" });
   const crop = await zarr.crop(l, z0, z1, box[0], box[1], box[2], box[3]), dims = [z1 - z0, box[1] - box[0], box[3] - box[2]];
   const win = viewWin(crop); last3d = { crop, win, dims, spacing: [sp[0], sp[1], sp[2]], labels: null, palette: null };
   let note = '';

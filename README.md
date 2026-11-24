@@ -103,6 +103,14 @@ Live: https://sensein.group/handwired-brain-transformer/ (GitHub Pages, branch `
 https://sensein.github.io/handwired-brain-transformer/.
 
 * **Viewer** (`index.html`): pick a slab, pan / zoom; models, scale and pyramid level follow the zoom.
+  * *Whole stitched slabs, not just strips*: a slab acquisition is 8–11 strips stacked along y (each ~7.4 mm tall, up to
+    127 mm long, ~0.8 mm overlap, z and x origins drifting by up to ~0.5 mm). The viewer stitches them from the physical
+    translation stored in each zarr (what Neuroglancer does with a multi-source layer), blending overlaps with a feathered
+    average; a strip that covers most of an earlier strip's region is a re-acquisition and is left out of the stitch
+    (listed as "strip N only"). YO sample 90 opens as one 2259 × 18542 × 49819-voxel slab at overview zoom. You can also
+    **paste a dashboard / Neuroglancer link**: every DANDI zarr source in it is mapped to the stitched slab.
+  * *Status banner* (top, expandable): current stage (open, tissue scan, streaming, exposure, inference with fetch vs run,
+    3D build, waiting for the view to settle), elapsed time, tile progress, chunks / MB streamed and a short log.
   * *Depth like Neuroglancer*: Shift+wheel, PageUp/PageDown or arrow keys step through z (Shift: x10); a slab-thickness
     option shows a max projection or mean over 1–31 planes.
   * *Exposure*: brightness / contrast / gamma sliders on top of the model-recommended window and gamma (toggle "auto

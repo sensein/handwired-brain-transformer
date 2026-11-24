@@ -108,7 +108,7 @@ async function loadCell(td, g) {
     label = `${model} L${rl} · ${fmt}`;
   }
   td.querySelector('small').textContent = `${label}`;
-  td.querySelector('.cell').onclick = () => open(`index.html#id=${a.zarr}&p=${p.toFixed(2)}&cx=${cxum0(x0, w, sp)}&cy=${cyum0(y0, h, sp)}&z=${Math.round(zl * 2 ** lv)}`, '_blank');
+  td.querySelector('.cell').onclick = () => open(`index.html#slab=0&id=${a.zarr}&p=${p.toFixed(2)}&cx=${cxum0(x0, w, sp)}&cy=${cyum0(y0, h, sp)}&z=${Math.round(zl * 2 ** lv)}`, '_blank');
 }
 const cxum0 = (x0, w, sp) => Math.round((x0 + w / 2) * sp[2]), cyum0 = (y0, h, sp) => Math.round((y0 + h / 2) * sp[1]);
 
