@@ -22,6 +22,7 @@ $('model').add(new Option('None (raw only)', 'none'));
 function routeCell(p, stain, sel, z) {
   if (sel === 'none') return { model: 'none' };
   const fam = sel === 'auto' ? familyForZoom(p, stain) : sel;
+  if (fam === 'none') return { model: 'none' };
   return scaledModel(fam, p, z, 'auto');
 }
 

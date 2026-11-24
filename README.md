@@ -47,7 +47,7 @@ fetched 597×64 voxels at level 5 in one pass.
 | Program | Zoom band (µm per screen px) | What it computes | Nonzero params |
 |---|---|---|---|
 | `exposure` | always | FOV mean and mean +/- deviations via global heads → recommended display window `[lo, hi]` and mean; viewer derives gamma. Coefficients are two scalars fitted in closed form against the 2nd–99.7th percentile window on real crops. | 15 |
-| `tissue` | ≥ 8.5 | smoothed display image vs. FOV mean, thresholds relative to the FOV's own spread (global head) plus an absolute darkness floor → bg / gray / white | 53 |
+| `fable_tissue` (default, YO/NN) / `tissue` (builder) | ≥ 8.5 | smoothed display image vs. FOV mean, thresholds relative to the FOV's own spread (global head) plus an absolute darkness floor → bg / gray / white | 53 |
 | `layers` (**experimental**, never auto-selected) | explicit choice only, run at L5 | density indicators → pia and white-matter proximity (Gaussian attention at 150/400/900 µm) → signed depth → ReLU bands I–VI at depths declared in µm | ~320 |
 | `fable_blobs_v2` (default) / `cells` (builder) | < 8.5 (YO/NN/other) | hand-written v2 at levels 0-1 / builder DoG on the display image; `seg = step(dog - kappa*mean|dog| - tau0)`, kappa 2, tau0 0.03 | ~50 |
 | `vessels_13dir`, `vessels_26dir` | < 8.5 (LEC/CD31) | max over oriented elongated Gaussians minus wide background; kappa 1, tau0 0.12 | ~330 / ~650 |
@@ -145,6 +145,32 @@ windows), so it is routed to LEC only; round bright vessel cross-sections in LEC
 (vessels crossing the depth slab are missed) and `capillary` is weak; at level 2 and coarser both programs return nothing
 by design; contrast >= 2 and gamma still change the masks (IoU 0.2-0.7); blobs v2 can mark a crack rim; no real-data accuracy
 numbers exist (no labels). `demo/test/fable_viewer.mjs` runs a hand-written model in the viewer.
+
+### Tissue and cortex vs white matter (hand-written, YO/NN)
+
+`fable_tissue.json` (d 57, 543 nonzero params), `fable_cortex_wm.json` (d 62, 598) and the experimental `fable_layers.json`
+(d 69, 649) are hard class maps for pyramid levels 4-6 (whole-slab and multi-mm views). Tissue builds a soft CDF of the
+field of view's display intensities with global heads and thresholds between the dark (background) and bright mode, with
+gates that switch every output off in dark, flat or washed-out views. Cortex vs white matter is **geometric, not measured**:
+cortex is tissue within about 3.3 mm of an open tissue edge (about 2.2 mm inside a narrow sulcus, about 1.9 mm either side of
+a closed sulcus that shows as a thin dark line), white matter is tissue deeper than that; the layers program cuts the cortex
+mask at about 1 mm and 1.9 mm from the pia. Both agents' reasoning and iteration logs are in `weights/fable/NOTES_tissue_layers.md`.
+I ran them on the four stitched whole slabs next to my builder tissue program (`scripts/compare_regions.py`): the builder
+program now labels all tissue "gray" and finds no white matter at all, while the hand-written maps give a clean tissue mask,
+a cortex ribbon along the pial surface and white-matter cores with closed sulci and the ventricle handled
+(`demo/test/ng_link_test.mjs` with `REGIONS=1` runs them on the whole stitched slab inside Neuroglancer: tissue outline and
+cortex/white-matter boundary as contour annotations, one pass over a 779 x 290-voxel level-6 view).
+
+Agent-reported robustness (mean IoU vs the default view over 9 fields of view): tissue 0.93-0.98 and background 0.89-0.97 for
+contrast 0.5-4, gamma 0.5-2 and brightness +-0.15; cortex 0.72-0.94 and white matter 0.76-0.96 (13 of 126 cells below 0.7, all at
+contrast >= 2 or gamma 2); layer bands are least stable (21 of 63 cells below 0.7). Dark, flat and saturated views detect nothing.
+
+Known limitations: the cortex/WM boundary is a fixed distance from the pia and ignores real thickness changes; false cortex
+rings around dark structures inside white matter (lateral ventricle, holes, tears, long dark vessels); closed sulci with no
+visible dark line, and cortex whose pia is outside the field of view, are missed; the thin-line detector is the fragile part
+(depends on level and contrast); out-of-plane haze at level 6 turns into tissue at contrast >= 2 on one slab. These programs
+are only meaningful for the NN and YO stains (on LEC they return nothing or a full rectangle), so the router skips them for LEC.
+Not tested: levels 0-3, LEC, and no real-data accuracy numbers exist (no labels).
 
 ## Streaming, no bulk download
 

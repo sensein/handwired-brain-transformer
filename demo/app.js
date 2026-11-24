@@ -4,7 +4,7 @@ import { banner } from './banner.js';
 import { ngState } from './ng-state.js';
 import { VolumeView } from './volume.js';
 import { FAMILIES, familyForZoom, scaledModel, scaleLabel } from './route.js';
-import { MULTI, MULTI_COLORS, recommendExposure, segVolume, labelVolume, paletteFor, segRegion, renderSegCanvas, regionStats, toCanvas, COLORS, IDENT, isIdent, adjustU, adjustLogVol, percentileWindow } from './seg.js';
+import { HARD, CLASSES, MULTI, MULTI_COLORS, recommendExposure, segVolume, labelVolume, paletteFor, segRegion, renderSegCanvas, regionStats, toCanvas, COLORS, IDENT, isIdent, adjustU, adjustLogVol, percentileWindow } from './seg.js';
 
 let TS = 128;                   // segmentation tile size (in-plane voxels); per-program via models/index.json
 let MAX_TILES = 48;           // tiles segmented per refresh (nearest the view center first)
@@ -13,7 +13,7 @@ const $ = (id) => document.getElementById(id);
 // ------------------------------------------------------------------------------------------ state
 const assets = await (await fetch('assets.json')).json();
 const modelIndex = await (await fetch('models/index.json')).json();
-const MODEL_LABEL = { fable_blobs_v2: 'Hand-written cells v2: nucleus / soma (levels 0-1, cheap)', fable_vessels_v2: 'Hand-written vessels v2: capillary / vessel (levels 0-1, LEC only)', fable_blobs: 'EXPERIMENTAL hand-written cells: nucleus / soma / cluster (heavy)', fable_vessels: 'EXPERIMENTAL hand-written vessels: capillary / vessel / large (heavy, weak on LEC)', tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
+const MODEL_LABEL = { fable_tissue: 'Tissue vs background (hand-written, YO/NN)', fable_cortex_wm: 'Cortex vs white matter (hand-written, geometric: distance from pia)', fable_layers: 'EXPERIMENTAL distance-from-pia bands (hand-written)', fable_blobs_v2: 'Hand-written cells v2: nucleus / soma (levels 0-1, cheap)', fable_vessels_v2: 'Hand-written vessels v2: capillary / vessel (levels 0-1, LEC only)', fable_blobs: 'EXPERIMENTAL hand-written cells: nucleus / soma / cluster (heavy)', fable_vessels: 'EXPERIMENTAL hand-written vessels: capillary / vessel / large (heavy, weak on LEC)', tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
 const programs = {};
 async function getProgram(name) { return programs[name] ||= parseProgram(await (await fetch(`models/${modelIndex[name].file}`)).text()); }
 
@@ -331,7 +331,7 @@ function updateInfo(r) {
     ['Parameters', np ? `${np.nonzero} nonzero (${np.total} dense)` : '-'], ['Layers / heads', prog ? `${prog.layers.length} / ${prog.layers.reduce((a, b) => a + b.heads.length, 0)}` : '-'],
     ['Streamed', `${(zarr.net / 1e6).toFixed(1)} MB (cache ${(zarr.bytes / 1e6).toFixed(0)} MB)`]];
   $('info').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
-  $('legend').innerHTML = MULTI[r.kind] ? MULTI[r.kind].map((k) => `<span style="background:rgb(${MULTI_COLORS[k]})"></span>${k}`).join('') : r.kind === 'layers' ? ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'].map((k) => `<span style="background:rgb(${COLORS[k]})"></span>${k}`).join('') : r.kind === 'tissue' ? `<span style="background:rgb(90,90,100)"></span>background<span style="background:rgb(255,160,40)"></span>gray<span style="background:rgb(60,140,255)"></span>white` : r.kind === 'vessels' ? '<span style="background:rgb(40,220,255)"></span>vessel' : r.kind === 'cells' ? '<span style="background:rgb(255,60,200)"></span>cell' : '';
+  $('legend').innerHTML = HARD.has(r.kind) ? CLASSES[r.kind].filter((k) => k !== 'bg').map((k) => `<span style="background:rgb(${COLORS[k]})"></span>${k}`).join('') + ' (nothing drawn where the model abstains)' : MULTI[r.kind] ? MULTI[r.kind].map((k) => `<span style="background:rgb(${MULTI_COLORS[k]})"></span>${k}`).join('') : r.kind === 'layers' ? ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'].map((k) => `<span style="background:rgb(${COLORS[k]})"></span>${k}`).join('') : r.kind === 'tissue' ? `<span style="background:rgb(90,90,100)"></span>background<span style="background:rgb(255,160,40)"></span>gray<span style="background:rgb(60,140,255)"></span>white` : r.kind === 'vessels' ? '<span style="background:rgb(40,220,255)"></span>vessel' : r.kind === 'cells' ? '<span style="background:rgb(255,60,200)"></span>cell' : '';
 }
 
 // ------------------------------------------------------------------------------------------ asset handling

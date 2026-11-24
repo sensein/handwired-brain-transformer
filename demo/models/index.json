@@ -293,5 +293,60 @@
    "vessel"
   ],
   "author": "fable (hand-written weights)"
+ },
+ "fable_tissue": {
+  "file": "fable_tissue.json",
+  "kind": "tissue2",
+  "dense": 28305,
+  "nonzero": 543,
+  "heads": 20,
+  "layers": 7,
+  "tile": 128,
+  "family": "fable_tissue",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "tissue",
+   "bg"
+  ],
+  "author": "fable (hand-written weights)"
+ },
+ "fable_cortex_wm": {
+  "file": "fable_cortex_wm.json",
+  "kind": "cortex_wm",
+  "dense": 32765,
+  "nonzero": 598,
+  "heads": 22,
+  "layers": 9,
+  "tile": 128,
+  "family": "fable_cortex_wm",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "cortex",
+   "wm",
+   "bg"
+  ],
+  "author": "fable (hand-written weights)"
+ },
+ "fable_layers": {
+  "file": "fable_layers.json",
+  "kind": "layers2",
+  "dense": 38800,
+  "nonzero": 649,
+  "heads": 24,
+  "layers": 10,
+  "tile": 128,
+  "family": "fable_layers",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "sup",
+   "mid",
+   "deep",
+   "wm",
+   "bg"
+  ],
+  "author": "fable (hand-written weights)"
  }
 }

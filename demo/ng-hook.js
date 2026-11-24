@@ -1,7 +1,7 @@
 // Neuroglancer bridge: runs inside our own Neuroglancer build (same origin on GitHub Pages). Reads the view from
 // window.viewer, runs a weight-space-programmed model on exactly that field of view with the WebGPU engine, and writes the
 // detections back as a Neuroglancer annotation layer. Triggered by a button, or automatically (debounced) as you navigate.
-import { parseProgram, GPUEngine } from './engine.js';
+import { parseProgram, GPUEngine, haloFor } from './engine.js';
 import { Zarr, Slab, clamp } from './zarr.js';
 import { segRegion, adjustLogVol, recommendExposure, IDENT } from './seg.js';
 import { scaledModel, FAMILIES } from './route.js';
@@ -14,7 +14,7 @@ const viewer = window.viewer;
 
 // ---- small UI
 const box = el('div', 'position:fixed;left:8px;bottom:8px;z-index:9999;background:rgba(20,21,26,.92);color:#e8e8e4;font:12px/1.4 system-ui;padding:8px 10px;border:1px solid #444;border-radius:8px;max-width:340px');
-box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="tissue">tissue + gray/white boundary (contours)</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
+box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="regions">tissue outline + cortex / white-matter boundary (contours)</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
 document.body.append(box);
 const say = (t) => { document.getElementById('hw-s').textContent = t; window.__hwNg.status = t; };
 window.__hwNg = { status: '', runs: 0 };
@@ -73,25 +73,28 @@ function contourSegments(mask, w, h) {
   return segs;
 }
 async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
-  const keys = Object.keys(d), pos = j.position || [], L0 = zarr.levels[0], budget = Math.floor(engine.maxTokens(32) * 0.6);
-  const m0 = scaledModel('tissue', umPerPx, zarr), prog = await getProgram(m0.model);
+  const keys = Object.keys(d), pos = j.position || [];
+  const m0 = scaledModel('fable_tissue', umPerPx, zarr), progT = await getProgram('fable_tissue'), progC = await getProgram('fable_cortex_wm');
   const gx = [fov.tl[3], fov.br[3]].sort((a, b) => a - b), gy = [fov.tl[2], fov.br[2]].sort((a, b) => a - b), lz = fov.c[1] - off[0];
-  let level = m0.level, box_;
+  const dmax = Math.max(progT.d, progC.d); let level = m0.level, box_;
   for (;;) {                                                                       // coarsen until the whole FOV fits one pass
-    const f = 2 ** level, L = zarr.levels[level];
+    const f = 2 ** level, L = zarr.levels[level], hz = Math.max(haloFor(progT, L.sp)[0], haloFor(progC, L.sp)[0]);
     box_ = [clamp(Math.floor((gy[0] - off[1]) / f), 0, L.shape[1] - 1), clamp(Math.ceil((gy[1] - off[1]) / f), 1, L.shape[1]), clamp(Math.floor((gx[0] - off[2]) / f), 0, L.shape[2] - 1), clamp(Math.ceil((gx[1] - off[2]) / f), 1, L.shape[2])];
-    if ((2 * 6 + 1) * (box_[1] - box_[0]) * (box_[3] - box_[2]) <= budget || level >= zarr.top) break; level++;
+    if ((2 * hz + 1) * (box_[1] - box_[0]) * (box_[3] - box_[2]) <= Math.floor(engine.maxTokens(dmax) * 0.6) || level >= zarr.top) break; level++;
   }
   const f = 2 ** level, L = zarr.levels[level], zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
-  say(`tissue on ${box_[3] - box_[2]}x${box_[1] - box_[0]} voxels at level ${level}: streaming...`);
+  say(`regions on ${box_[3] - box_[2]}x${box_[1] - box_[0]} voxels at level ${level}: streaming...`);
   const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), level, zl, box_[0], box_[1], box_[2], box_[3]);
-  say('tissue: running on WebGPU...');
-  const r = await segRegion(zarr, engine, prog, level, zl, box_[0], box_[1], box_[2], box_[3], (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma }), { halo: false });
-  const w = r.w, h = r.h, tis = new Uint8Array(w * h), gray = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (r.oy + y) * r.dims[2] + r.ox + x, bg = r.out.bg[i], gr = r.out.gray[i], wh = r.out.white[i]; tis[y * w + x] = bg > Math.max(gr, wh) ? 0 : 1; gray[y * w + x] = tis[y * w + x] && gr > wh ? 1 : 0; }
+  const adjust = (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma });
+  say('regions: tissue program on WebGPU...');
+  const rT = await segRegion(zarr, engine, progT, level, zl, box_[0], box_[1], box_[2], box_[3], adjust, { halo: false });
+  say('regions: cortex / white-matter program on WebGPU...');
+  const rC = await segRegion(zarr, engine, progC, level, zl, box_[0], box_[1], box_[2], box_[3], adjust, { halo: false });
+  const w = rT.w, h = rT.h, tis = new Uint8Array(w * h), wm = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const q = y * w + x; tis[q] = rT.out.tissue[(rT.oy + y) * rT.dims[2] + rT.ox + x] > 0.5 ? 1 : 0; wm[q] = rC.out.wm[(rC.oy + y) * rC.dims[2] + rC.ox + x] > 0.5 ? 1 : 0; }
   const toG = (p) => { const g = { z: zl * f + off[0], y: (box_[0] + p[1]) * f + off[1], x: (box_[2] + p[0]) * f + off[2] }; return keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)); };
   const mk = (segs, tag) => segs.map((s2, i) => ({ type: 'line', id: tag + i, pointA: toG(s2[0]), pointB: toG(s2[1]) }));
-  const layers = [['hwseg tissue outline', '#ffd23c', mk(contourSegments(tis, w, h), 't')], ['hwseg gray/white boundary', '#3cd2ff', mk(contourSegments(gray, w, h), 'g')]];
+  const layers = [['hwseg tissue outline', '#ffd23c', mk(contourSegments(tis, w, h), 't')], ['hwseg cortex/white-matter boundary', '#3cd2ff', mk(contourSegments(wm, w, h), 'w')]];
   const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name));
   const LINE_SHADER = 'void main() { setColor(defaultColor()); setLineWidth(1.5); setEndpointMarkerSize(0.0); setEndpointMarkerBorderWidth(0.0); }';   // thin lines, no endpoint markers
   for (const [name, col, ann] of layers) k.layers.push({ type: 'annotation', name, annotationColor: col, shader: LINE_SHADER, source: { url: 'local://annotations', transform: { outputDimensions: Object.fromEntries(keys.map((kk) => [kk, d[kk]])) } }, annotations: ann });
@@ -99,8 +102,9 @@ async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
   k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';
   lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
-  say(`${layers[0][2].length} outline + ${layers[1][2].length} gray/white segments (${m0.model}, level ${level}, ${umPerPx.toFixed(0)} um/px, FOV ${w}x${h} voxels)`);
-  window.__hwNg.last = { regions: true, outline: layers[0][2].length, boundary: layers[1][2].length, level, fov: [w, h] };
+  const tp = 100 * tis.reduce((a, b) => a + b, 0) / (w * h), wp = 100 * wm.reduce((a, b) => a + b, 0) / (w * h);
+  say(`${layers[0][2].length} outline + ${layers[1][2].length} cortex/WM segments (tissue ${tp.toFixed(0)}%, white matter ${wp.toFixed(0)}%, level ${level}, ${umPerPx.toFixed(0)} um/px, FOV ${w}x${h} voxels)`);
+  window.__hwNg.last = { regions: true, outline: layers[0][2].length, boundary: layers[1][2].length, tissuePct: tp, wmPct: wp, level, fov: [w, h] };
 }
 
 async function detect() {
@@ -113,7 +117,7 @@ async function detect() {
   // level-0 local voxel box of the FOV
   const lx = [gx[0] - off[2], gx[1] - off[2]], ly = [gy[0] - off[1], gy[1] - off[1]], lz = gz - off[0];
   const umPerPx = ((gx[1] - gx[0]) * L0.sp[2]) / fov.w;                       // physical size of a screen pixel
-  if ($('hw-m').value === 'tissue') return detectRegions(j, fov, zarr, off, d, umPerPx, sp0);
+  if ($('hw-m').value === 'regions') return detectRegions(j, fov, zarr, off, d, umPerPx, sp0);
   const family = $('hw-m').value, m = scaledModel(family, umPerPx, zarr), prog = await getProgram(m.model), f = 2 ** m.level, L = zarr.levels[m.level];
   const box_ = [clamp(Math.floor(ly[0] / f), 0, L.shape[1] - 1), clamp(Math.ceil(ly[1] / f), 1, L.shape[1]), clamp(Math.floor(lx[0] / f), 0, L.shape[2] - 1), clamp(Math.ceil(lx[1] / f), 1, L.shape[2])];
   const cap = 384, cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;                 // keep one pass within device memory: centre crop
@@ -131,7 +135,7 @@ async function detect() {
   const ann = comps.map((c, i) => { const g = { z: zl * f + off[0], y: (y0 + c.y) * f + off[1], x: (x0 + c.x) * f + off[2] };
     const rad = { z: Math.max(1, R(c) / L0.sp[0]), y: Math.max(1, R(c) / L0.sp[1]), x: Math.max(1, R(c) / L0.sp[2]) };
     return { type: 'ellipsoid', id: 'd' + i, center: keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)), radii: keys.map((kk) => rad[kk] || 1) }; });
-  const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => l.name !== LAYER && !/^hwseg (tissue|gray)/.test(l.name));
+  const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => l.name !== LAYER && !/^hwseg (tissue|gray|cortex)/.test(l.name));
   k.layers.push({ type: 'annotation', name: LAYER, annotationColor: '#ff3cc8', source: { url: 'local://annotations', transform: { outputDimensions: dimJSON } }, annotations: ann });
   // the model's exposure becomes Neuroglancer's own window: log-domain lo / hi sliders of the layer shader
   const img = k.layers.find((l) => l.type === 'image' && l.shaderControls !== undefined || l.type === 'image');

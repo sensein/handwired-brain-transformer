@@ -38,9 +38,12 @@ export async function segRegion(zarr, engine, prog, level, zl, y0, y1, x0, x1, a
   return { out, raw: vol.subarray(zc * pl, (zc + 1) * pl), dims, ox: x0 - xs, oy: y0 - ys, w: x1 - x0, h: y1 - y0, level };
 }
 
-export const COLORS = { bg: [90, 90, 100], gray: [255, 160, 40], white: [60, 140, 255],
+export const COLORS = { bg: [90, 90, 100], gray: [255, 160, 40], white: [60, 140, 255], tissue: [90, 200, 120], cortex: [255, 160, 40], wm: [60, 140, 255], sup: [255, 230, 60], mid: [110, 210, 110], deep: [40, 170, 170],
   L1: [253, 231, 37], L2: [170, 220, 50], L3: [94, 201, 98], L4: [33, 145, 140], L5: [59, 82, 139], L6: [110, 40, 150], WM: [215, 215, 235] };
-export const CLASSES = { tissue: ['bg', 'gray', 'white'], layers: ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'] };
+export const CLASSES = { tissue: ['bg', 'gray', 'white'], layers: ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'],
+  // hand-written hard class maps: all channels zero = the model says nothing (dark / flat / unreadable view), drawn as no overlay
+  tissue2: ['bg', 'tissue'], cortex_wm: ['bg', 'cortex', 'wm'], layers2: ['bg', 'sup', 'mid', 'deep', 'wm'] };
+export const HARD = new Set(['tissue2', 'cortex_wm', 'layers2']);
 // Scale-invariant detectors with size classes: 'seg' gates, the class channels colour by size / type.
 export const MULTI = { blobs: ['nucleus', 'soma', 'cluster'], vessels_ms: ['capillary', 'vessel', 'large'] };
 export const MULTI_COLORS = { nucleus: [255, 60, 200], soma: [255, 170, 40], cluster: [120, 200, 255], capillary: [40, 220, 255], vessel: [80, 255, 120], large: [255, 230, 60] };
@@ -53,7 +56,7 @@ export function renderSegCanvas(kind, r) {
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const i = (oy + y) * dims[2] + ox + x, o = 4 * (y * w + x);
       if (MULTI[kind]) { if (out.seg[i] > 0.5) { const mn = multiNames(kind, out), c = MULTI_COLORS[mn[argmaxAt(out, mn, i)]]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 230; } }
-      else if (CLASSES[kind]) { const a = argmaxAt(out, CLASSES[kind], i), c = COLORS[CLASSES[kind][a]]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = a === 0 ? 150 : 200; }
+      else if (CLASSES[kind]) { const a = argmaxAt(out, CLASSES[kind], i); if (HARD.has(kind) && out[CLASSES[kind][a]][i] <= 0.5) continue; const c = COLORS[CLASSES[kind][a]]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = a === 0 ? 150 : 200; }
       else { const v = clamp(out.seg[i], 0, 1), c = kind === 'vessels' ? [40, 220, 255] : [255, 60, 200]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = v * 255; }
     }
   });
@@ -64,8 +67,9 @@ export function regionStats(kind, r, sp) {
   const { out, dims, ox, oy, w, h } = r, n = w * h, areaMm2 = (w * sp[2]) * (h * sp[1]) * 1e-6;
   if (CLASSES[kind]) {
     const names = CLASSES[kind], c = new Array(names.length).fill(0);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) c[argmaxAt(out, names, (oy + y) * dims[2] + ox + x)]++;
-    return Object.fromEntries(names.map((nm, k) => [nm, c[k] / n]));
+    let none = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (oy + y) * dims[2] + ox + x, a = argmaxAt(out, names, i); if (HARD.has(kind) && out[names[a]][i] <= 0.5) none++; else c[a]++; }
+    return { ...Object.fromEntries(names.map((nm, k) => [nm, c[k] / n])), ...(HARD.has(kind) ? { none: none / n } : {}) };
   }
   const mn = MULTI[kind] ? multiNames(kind, out) : null, cls = mn ? new Array(mn.length).fill(0) : null;
   let on = 0; const mask = new Uint8Array(n);
@@ -102,7 +106,7 @@ export function labelVolume(kind, r) {
   for (let z = 0; z < nz; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = z * plane + (oy + y) * dims[2] + ox + x, o = (z * h + y) * w + x;
     if (MULTI[kind]) lab[o] = out.seg[i] > 0.5 ? 1 + argmaxAt(out, multiNames(kind, out), i) : 0;
-    else if (names) { let b = 0, bv = -Infinity; for (let k = 0; k < names.length; k++) { const v = out[names[k]][i]; if (v > bv) { bv = v; b = k; } } lab[o] = b; }
+    else if (names) { let b = 0, bv = -Infinity; for (let k = 0; k < names.length; k++) { const v = out[names[k]][i]; if (v > bv) { bv = v; b = k; } } lab[o] = HARD.has(kind) && bv <= 0.5 ? 0 : b; }
     else lab[o] = out.seg[i] > 0.5 ? 1 : 0;
   }
   return lab;
