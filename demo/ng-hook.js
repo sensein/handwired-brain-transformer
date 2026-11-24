@@ -3,7 +3,7 @@
 // detections back as a Neuroglancer annotation layer. Triggered by a button, or automatically (debounced) as you navigate.
 import { parseProgram, GPUEngine, haloFor } from './engine.js';
 import { Zarr, Slab, clamp } from './zarr.js';
-import { segRegion, adjustLogVol, recommendExposure, IDENT } from './seg.js';
+import { segRegion, segVolume, adjustLogVol, recommendExposure, IDENT } from './seg.js';
 import { scaledModel, FAMILIES } from './route.js';
 
 const LAYER = 'hwseg detections';
@@ -42,7 +42,7 @@ const viewer = window.viewer;
 
 // ---- small UI
 const box = el('div', 'position:fixed;left:8px;bottom:8px;z-index:9999;background:rgba(20,21,26,.92);color:#e8e8e4;font:12px/1.4 system-ui;padding:8px 10px;border:1px solid #444;border-radius:8px;max-width:340px');
-box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="regions">tissue outline + cortex / white-matter boundary (contours)</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
+box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="regions">tissue outline + cortex / white-matter boundary (contours)</option></select> <select id="hw-nz" title="planes in z the detector runs on (3-D); 1 = displayed plane only"><option value="1">1 plane (2-D)</option><option value="5">5 planes</option><option value="9" selected>9 planes</option><option value="15">15 planes</option><option value="25">25 planes</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
 const EMBEDDED = new URLSearchParams(location.search).has('embedded');    // the shell page drives us through window.__hwNg
 document.body.append(box); if (EMBEDDED) box.style.display = 'none';
 window.__hwNg = { status: '', runs: 0, busy: false, events: [], last: null };
@@ -88,6 +88,23 @@ function components(seg, dims, ox, oy, w, h) {
     while (st.length) { const j = st.pop(), x = j % w, y = (j / w) | 0; n++; sx += x; sy += y;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue; const k = yy * w + xx; if (mask[k] && !seen[k]) { seen[k] = 1; st.push(k); } } }
     if (n >= 3) out.push({ x: sx / n, y: sy / n, r: Math.sqrt(n / Math.PI) });
+  }
+  return out;
+}
+
+// ---- 3-D connected components (6-neighbourhood) over a slab of the segmentation -> centroid + per-axis radii.
+// For a solid ellipsoid the variance along an axis is r^2/5, so r = sqrt(5 var) (plus half a voxel for single-plane extents).
+function components3(seg, dims, ox, oy, w, h, nz) {
+  const plane = dims[1] * dims[2], n = nz * h * w, mask = new Uint8Array(n), seen = new Uint8Array(n), out = [];
+  for (let z = 0; z < nz; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) mask[(z * h + y) * w + x] = seg[z * plane + (oy + y) * dims[2] + ox + x] > 0.5 ? 1 : 0;
+  const nb = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  for (let i = 0; i < n; i++) if (mask[i] && !seen[i]) {
+    let c = 0, sx = 0, sy = 0, sz = 0, qx = 0, qy = 0, qz = 0, zmin = nz, zmax = -1; const st = [i]; seen[i] = 1;
+    while (st.length) { const j = st.pop(), x = j % w, y = ((j / w) | 0) % h, z = (j / (w * h)) | 0; c++; sx += x; sy += y; sz += z; qx += x * x; qy += y * y; qz += z * z; if (z < zmin) zmin = z; if (z > zmax) zmax = z;
+      for (const [dx, dy, dz] of nb) { const xx = x + dx, yy = y + dy, zz = z + dz; if (xx < 0 || yy < 0 || zz < 0 || xx >= w || yy >= h || zz >= nz) continue; const k = (zz * h + yy) * w + xx; if (mask[k] && !seen[k]) { seen[k] = 1; st.push(k); } } }
+    if (c < 3) continue;
+    const mx = sx / c, my = sy / c, mz = sz / c, rad = (q, m) => Math.sqrt(5 * Math.max(q / c - m * m, 0) + 0.25);
+    out.push({ x: mx, y: my, z: mz, rx: rad(qx, mx), ry: rad(qy, my), rz: rad(qz, mz), vox: c, edgeZ: zmin === 0 || zmax === nz - 1 });
   }
   return out;
 }
@@ -153,29 +170,34 @@ async function detect() {
   if (umPerPx > 16) { say(`zoom in first: cells and vessels need a field of view of a few mm (this view is ${umPerPx.toFixed(0)} um/px)`); return; }
   const family = $('hw-m').value, m = scaledModel(family, umPerPx, zarr), prog = await getProgram(m.model), f = 2 ** m.level, L = zarr.levels[m.level];
   const box_ = [clamp(Math.floor(ly[0] / f), 0, L.shape[1] - 1), clamp(Math.ceil(ly[1] / f), 1, L.shape[1]), clamp(Math.floor(lx[0] / f), 0, L.shape[2] - 1), clamp(Math.ceil(lx[1] / f), 1, L.shape[2])];
-  const cap = 384, core = 320, hal = (cap - core) >> 1, zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
+  const nzWant = Math.max(1, +$('hw-nz').value || 1), zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
+  const zA = clamp(zl - (nzWant >> 1), 0, Math.max(0, L.shape[0] - nzWant)), zB = Math.min(L.shape[0], zA + nzWant), nz = zB - zA;   // slab [zA,zB) centred on the displayed plane
+  const mz = nz > 1 ? Math.min(4, Math.ceil(10 / L.sp[0])) : 0, zA2 = Math.max(0, zA - mz), zB2 = Math.min(L.shape[0], zB + mz);   // margin planes so objects cut by the slab edge keep their full z extent; a detection belongs to the slab if its centre is inside [zA,zB)
+  const [hz] = haloFor(prog, L.sp), Zin = Math.min(L.shape[0], (zB2 - zA2) + 2 * hz), hal = 32;
+  const side = Math.max(96 + 2 * hal, Math.min(512, Math.floor(Math.sqrt(engine.maxTokens(prog.d) * 0.8 / Zin))));   // tile side that keeps (slab + z halo) tokens within the device buffer
+  const core = side - 2 * hal;
   const cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;
-  const cy0 = Math.max(0, cy - (cap >> 1)), cy1 = Math.min(L.shape[1], cy + (cap >> 1)), cx0 = Math.max(0, cx - (cap >> 1)), cx1 = Math.min(L.shape[2], cx + (cap >> 1));
+  const cy0 = Math.max(0, cy - 192), cy1 = Math.min(L.shape[1], cy + 192), cx0 = Math.max(0, cx - 192), cx1 = Math.min(L.shape[2], cx + 192);
   say(`${m.model}: streaming exposure window...`);
   const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, cy0, cy1, cx0, cx1);
-  // the whole field of view is covered by overlapping tiles (core + halo, one GPU pass each); a detection belongs to the tile whose core holds its centre
+  // the whole field of view is covered by overlapping tiles (core + halo, one GPU pass each over the whole z slab); a detection belongs to the tile whose core holds its centre
   const tiles = []; for (let ty = box_[0]; ty < box_[1]; ty += core) for (let tx = box_[2]; tx < box_[3]; tx += core) tiles.push([ty, Math.min(ty + core, box_[1]), tx, Math.min(tx + core, box_[3])]);
   tiles.sort((p, q) => Math.hypot((p[0] + p[1]) / 2 - cy, (p[2] + p[3]) / 2 - cx) - Math.hypot((q[0] + q[1]) / 2 - cy, (q[2] + q[3]) / 2 - cx));   // centre first
-  const MAXT = 100, use = tiles.slice(0, MAXT); let sL = L.sp, R = (c) => c.r * sL[2], comps = [], y0 = box_[0], x0 = box_[2], y1 = box_[1], x1 = box_[3];
+  const MAXT = 100, use = tiles.slice(0, MAXT), comps = [];
   for (let ti = 0; ti < use.length; ti++) {
     const [cy_0, cy_1, cx_0, cx_1] = use[ti], Y0 = Math.max(0, cy_0 - hal), Y1 = Math.min(L.shape[1], cy_1 + hal), X0 = Math.max(0, cx_0 - hal), X1 = Math.min(L.shape[2], cx_1 + hal);
-    say(`${m.model}: tile ${ti + 1}/${use.length} (${X1 - X0}x${Y1 - Y0} voxels, level ${m.level}) on WebGPU...`);
-    const r = await segRegion(zarr, engine, prog, m.level, zl, Y0, Y1, X0, X1, (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma }), { halo: false });
-    for (const c of components(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h)) { const gy_ = Y0 + c.y, gx_ = X0 + c.x; if (gy_ >= cy_0 && gy_ < cy_1 && gx_ >= cx_0 && gx_ < cx_1) comps.push({ ...c, y: gy_ - 0, x: gx_ - 0 }); }
+    say(`${m.model}: tile ${ti + 1}/${use.length} (${X1 - X0}x${Y1 - Y0}x${nz} planes, level ${m.level}) on WebGPU...`);
+    const r = await segVolume(zarr, engine, prog, m.level, zA2, zB2, Y0, Y1, X0, X1, (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma }), { halo: false });
+    for (const c of components3(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h, r.nz)) { const gy_ = Y0 + c.y, gx_ = X0 + c.x; const gz_ = zA2 + c.z; if (gy_ >= cy_0 && gy_ < cy_1 && gx_ >= cx_0 && gx_ < cx_1 && gz_ >= zA - 0.5 && gz_ < zB - 0.5) comps.push({ ...c, y: gy_, x: gx_, z: gz_ }); }
   }
-  y0 = 0; x0 = 0; y1 = box_[1]; x1 = box_[3];           // detections are already in level-local voxel coordinates
   if (tiles.length > use.length) say(`field of view needs ${tiles.length} tiles; the ${use.length} nearest the centre were run - zoom in for full coverage`);
-  // voxel (level m.level, local) -> Neuroglancer global voxel (level 0 + translation)
+  const sL = L.sp;
+  // voxel (level m.level, local) -> Neuroglancer global voxel (level 0 + translation); the radii are the measured 3-D extents
   // Annotation space = the viewer's own dimensions in the same order (t, z, y, x): any other space reorders the global
   // dimensions and resets the view. Dimensions we do not segment (t) take the current position and radius 1.
   const keys = Object.keys(d), pos = j.position || [], dimJSON = Object.fromEntries(keys.map((kk) => [kk, d[kk]]));
-  const ann = comps.map((c, i) => { const g = { z: zl * f + off[0], y: (y0 + c.y) * f + off[1], x: (x0 + c.x) * f + off[2] };
-    const rad = { z: Math.max(1, R(c) / L0.sp[0]), y: Math.max(1, R(c) / L0.sp[1]), x: Math.max(1, R(c) / L0.sp[2]) };
+  const ann = comps.map((c, i) => { const g = { z: (c.z + 0.5) * f + off[0], y: (c.y + 0.5) * f + off[1], x: (c.x + 0.5) * f + off[2] };
+    const rad = { z: Math.max(1, c.rz * sL[0] / L0.sp[0]), y: Math.max(1, c.ry * sL[1] / L0.sp[1]), x: Math.max(1, c.rx * sL[2] / L0.sp[2]) };
     return { type: 'ellipsoid', id: 'd' + i, center: keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)), radii: keys.map((kk) => rad[kk] || 1) }; });
   const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => l.name !== LAYER && !/^hwseg (tissue|gray|cortex)/.test(l.name));
   k.layers.push({ type: 'annotation', name: LAYER, annotationColor: '#ff3cc8', source: { url: 'local://annotations', transform: { outputDimensions: dimJSON } }, annotations: ann });
@@ -184,8 +206,8 @@ async function detect() {
   if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
   k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';        // restoreState drops the displayed dimensions otherwise; the hook needs the x-y plane
   lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);   // reset first: a plain restoreState keeps a broken display plane
-  say(`${ann.length} detections (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
-  window.__hwNg.last = { n: ann.length, model: m.model, level: m.level, fov: [x1 - x0, y1 - y0] };
+  say(`${ann.length} 3-D detections over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
+  window.__hwNg.last = { n: ann.length, model: m.model, level: m.level, planes: nz, tiles: use.length, fov: [box_[3] - box_[2], box_[1] - box_[0]], zspan: ann.length ? [Math.min(...comps.map((c) => c.z)), Math.max(...comps.map((c) => c.z))] : null, meanRz: comps.length ? comps.reduce((a_, c) => a_ + c.rz, 0) / comps.length : 0, edgeZ: comps.filter((c) => c.edgeZ).length };
 }
 const $ = (id) => document.getElementById(id);
 const viewKey = () => { const j = viewer.state.toJSON(); return JSON.stringify([j.position, j.crossSectionScale, j.layout, (j.layers || []).filter((l) => l.name !== LAYER).map((l) => l.name)]); };
@@ -196,5 +218,6 @@ viewer.state.changed.add(() => {                                              //
   if (!$('hw-auto').checked || viewKey() === lastView) return; lastView = viewKey(); clearTimeout(timer); say('view changed: detecting after it settles...'); timer = setTimeout(run, 600);
 });
 window.__hwNg.run = run; window.__hwNg.runModel = (key) => { $('hw-m').value = key; return run(); };
+window.__hwNg.setDepth = (n) => { $('hw-nz').value = String(n); };
 window.__hwNg.setAuto = (on, key) => { if (key) $('hw-m').value = key; $('hw-auto').checked = !!on; if (on) run(); };
 window.__hwNg.ready = true; say('ready');

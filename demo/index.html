@@ -59,6 +59,7 @@
     <label for="nglink">Or paste a dashboard / Neuroglancer link</label><input id="nglink" type="text" placeholder="https://neuroglancer-demo.appspot.com/#!...">
     <hr style="border:0;border-top:1px solid var(--line);margin:14px 0 4px">
     <label for="model">Model on the current view</label><select id="model"></select>
+    <label for="depth">Depth (z planes the detector sees)</label><select id="depth"><option value="1">1 plane (2-D)</option><option value="5">5 planes</option><option value="9" selected>9 planes (3-D)</option><option value="15">15 planes</option><option value="25">25 planes</option></select>
     <button id="run" class="primary">Run on this view</button>
     <label class="check"><input type="checkbox" id="auto"> re-run when the view settles</label>
     <button id="fit">Fit whole slab</button>

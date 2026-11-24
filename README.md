@@ -191,6 +191,11 @@ Neuroglancer annotation layers (cells, vessels, tissue outline, cortex/white-mat
 precomputed volume* generated in the browser by our stitcher and served to Neuroglancer by a service worker (`sw.js`), so
 adjacent strips are cross-faded into one continuous volume. The old stand-alone 2D viewer remains at `viewer.html` (legacy;
 it documents the debounced FOV pipeline, depth keys and 3D renderer below); the slab gallery was removed.
+Cell and vessel detection in the Neuroglancer view is 3-D: the "Depth" selector (default 9 planes; 1 = the old single-plane mode) runs the
+model on a z slab (plus margin planes so objects cut by the slab edge keep their z extent), takes 6-connected components of the
+3-D segmentation, and draws each as an ellipsoid with *measured* x / y / z radii (r = sqrt(5 var) per axis). A detection belongs
+to the slab if its centre lies in it; tile cores own detections in x-y. The attention itself already spans z, but with a thin
+radius (cells ~5 um, vessels 2.5-6 um) so z context is a few planes; tissue and cortex/white-matter stay 2-D contours.
 Cortex / white-matter and layer programs are only routed at pyramid level >= 5 (coarse): the cortex boundary is a fixed
 distance from the pia and is not scale-invariant. Levels 0-2 need a field of view above ~10 mm, larger than a GPU buffer, so
 region programs are not tested there.
