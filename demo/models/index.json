@@ -202,5 +202,60 @@
   "family": "tissue",
   "scale": 4,
   "sigma0": 60.0
+ },
+ "fable_blobs": {
+  "file": "fable_blobs.json",
+  "kind": "blobs",
+  "dense": 16056,
+  "nonzero": 375,
+  "heads": 23,
+  "layers": 7,
+  "tile": 128,
+  "family": "fable_blobs",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "seg",
+   "nucleus",
+   "soma",
+   "cluster"
+  ],
+  "author": "fable (hand-written weights)"
+ },
+ "fable_vessels": {
+  "file": "fable_vessels.json",
+  "kind": "vessels_ms",
+  "dense": 114622,
+  "nonzero": 2374,
+  "heads": 72,
+  "layers": 9,
+  "tile": 128,
+  "family": "fable_vessels",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "seg",
+   "capillary",
+   "vessel",
+   "large"
+  ],
+  "author": "fable (hand-written weights)"
+ },
+ "fable_exposure": {
+  "file": "fable_exposure.json",
+  "kind": "exposure",
+  "dense": 5774,
+  "nonzero": 152,
+  "heads": 11,
+  "layers": 4,
+  "tile": 128,
+  "family": "fable_exposure",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "lo",
+   "hi"
+  ],
+  "author": "fable (hand-written weights)"
  }
 }

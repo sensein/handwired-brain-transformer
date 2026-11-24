@@ -82,3 +82,13 @@ def test_scale_equivariance_of_scaled_programs():
         for s in (2, 4):
             out = WiredTransformer(mk(scale=s), torch.float64).forward(L, tuple(x * s for x in sp))["score"]
             assert torch.allclose(ref, out, atol=1e-7), (name, s, (ref - out).abs().max().item())
+
+
+def test_browser_python_modules_are_in_sync_and_torch_free():
+    """demo/py/hwseg (what Pyodide loads) must equal src/hwseg for the torch-free modules, and import no torch."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for f in ("program", "wiring", "programs", "exposure"):
+        a = (root / "src/hwseg" / f"{f}.py").read_text()
+        assert a == (root / "demo/py/hwseg" / f"{f}.py").read_text(), f"run scripts/sync_browser_py.sh ({f}.py differs)"
+        assert "import torch" not in a and "scipy" not in a, f"{f}.py must stay browser-importable (numpy only)"

@@ -25,7 +25,7 @@ json.dump(index, open(f"{OUT}/index.json", "w"), indent=1)
 # hand-written weight files (weights/fable): copied verbatim, indexed with their own kind
 import shutil
 from hwseg.model import Program
-FABLE = {"fable_blobs": "blobs", "fable_vessels": "vessels_ms"}
+FABLE = {"fable_blobs": "blobs", "fable_vessels": "vessels_ms", "fable_exposure": "exposure"}
 for name, kind in FABLE.items():
     src = os.path.join(os.path.dirname(__file__), "..", "weights", "fable", name + ".json")
     if not os.path.exists(src):

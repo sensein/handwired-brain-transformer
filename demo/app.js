@@ -12,7 +12,7 @@ const $ = (id) => document.getElementById(id);
 // ------------------------------------------------------------------------------------------ state
 const assets = await (await fetch('assets.json')).json();
 const modelIndex = await (await fetch('models/index.json')).json();
-const MODEL_LABEL = { fable_blobs: 'Cells, scale-invariant (hand-written: nucleus / soma / cluster)', fable_vessels: 'Vessels, scale-invariant (hand-written: capillary / vessel / large)', tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
+const MODEL_LABEL = { fable_blobs: 'EXPERIMENTAL hand-written cells: nucleus / soma / cluster (heavy)', fable_vessels: 'EXPERIMENTAL hand-written vessels: capillary / vessel / large (heavy, weak on LEC)', tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
 const programs = {};
 async function getProgram(name) { return programs[name] ||= parseProgram(await (await fetch(`models/${modelIndex[name].file}`)).text()); }
 
@@ -261,7 +261,7 @@ async function refresh(opts = {}) {
   updateInfo(r);
   if (r.model === 'none' || (r.kind && !['tissue', 'layers'].includes(r.kind) && view.p > 14)) { draw(); setStatus(r.model === 'none' ? 'Raw only.' : r.note, true); return; }
   const prog = await getProgram(r.model); updateInfo(r);
-  if (['tissue', 'layers'].includes(r.kind)) { await refreshFov(prog, r, myGen); return; }
+  if (['tissue', 'layers'].includes(r.kind) || FAMILIES[r.family].invariant) { await refreshFov(prog, r, myGen); return; }   // scale-invariant programs may coarsen the level until the FOV fits
   fovSeg = null;
   if (await refreshFov(prog, r, myGen, true)) return;          // the model sees exactly the FOV (statistics, window) when it fits in device memory
   r.note = (r.note ? r.note + ' · ' : '') + 'FOV too large for device memory: tiles with per-tile statistics';

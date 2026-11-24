@@ -23,6 +23,18 @@ sp2 = (41.0, 58.0, 41.0)
 r = WiredTransformer(tissue(), torch.float32, fast=False).forward(torch.as_tensor(T), sp2)
 out["tissue"] = dict(dims=list(T.shape), spacing=list(sp2), logI=T.ravel().tolist(),
                      out={k: t.numpy().ravel().tolist() for k, t in r.items()})
+
+# hand-written (Fable) weight files: same golden check in every engine
+import os
+from hwseg.program import Program
+for nm in ("fable_blobs", "fable_vessels", "fable_exposure"):
+    f = os.path.join(os.path.dirname(__file__), "..", "weights", "fable", nm + ".json")
+    if not os.path.exists(f):
+        continue
+    pr = Program.from_json(open(f).read())
+    vin = np.log(vol + 1).astype(np.float32) if nm == "fable_exposure" else L        # exposure takes raw log(I+1); the others the display image
+    r = WiredTransformer(pr, torch.float32, fast=False).forward(torch.as_tensor(vin), sp)
+    out[nm] = dict(dims=list(vin.shape), spacing=list(sp), logI=vin.ravel().tolist(), out={k: t.numpy().ravel().tolist() for k, t in r.items()})
 json.dump(out, open(sys.argv[1], "w"), separators=(",", ":"))
 print({k: len(v["logI"]) for k, v in out.items()})
 
@@ -33,5 +45,17 @@ sp3 = (164.0, 232.0, 164.0)
 r = WiredTransformer(layers(), torch.float32, fast=False).forward(torch.as_tensor(Lg), sp3)
 out["layers"] = dict(dims=list(Lg.shape), spacing=list(sp3), logI=Lg.ravel().tolist(),
                      out={k: t.numpy().ravel().tolist() for k, t in r.items()})
+
+# hand-written (Fable) weight files: same golden check in every engine
+import os
+from hwseg.program import Program
+for nm in ("fable_blobs", "fable_vessels", "fable_exposure"):
+    f = os.path.join(os.path.dirname(__file__), "..", "weights", "fable", nm + ".json")
+    if not os.path.exists(f):
+        continue
+    pr = Program.from_json(open(f).read())
+    vin = np.log(vol + 1).astype(np.float32) if nm == "fable_exposure" else L        # exposure takes raw log(I+1); the others the display image
+    r = WiredTransformer(pr, torch.float32, fast=False).forward(torch.as_tensor(vin), sp)
+    out[nm] = dict(dims=list(vin.shape), spacing=list(sp), logI=vin.ravel().tolist(), out={k: t.numpy().ravel().tolist() for k, t in r.items()})
 json.dump(out, open(sys.argv[1], "w"), separators=(",", ":"))
 print({k: len(v["logI"]) for k, v in out.items()})

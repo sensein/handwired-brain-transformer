@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .model import (CH_LOGI, CH_ONE, N_BASE, Head, Layer, MLP, Program)
+from .program import (CH_LOGI, CH_ONE, N_BASE, Head, Layer, MLP, Program)
 
 POS = (1, 2, 3)
 QUAD = {(0, 0): 5, (1, 1): 6, (2, 2): 7, (0, 1): 8, (0, 2): 9, (1, 2): 10}

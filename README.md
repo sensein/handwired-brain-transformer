@@ -91,6 +91,33 @@ axis, not a trained outcome: for vessels, direction count trades accuracy for si
   Thresholds (`kappa`, `tau0`, layer depth priors) are declared design constants calibrated on phantoms or anatomy
   priors, not fitted per slab. Vessel programs belong to LEC/CD31 stains; on nuclear stains they respond to cell bodies.
 
+## Python in the browser (Pyodide) and Neuroglancer
+
+* **Python lab** (`lab.html`): Pyodide (Python 3.14 in WebAssembly) imports the numpy-only `hwseg` modules
+  (`program.py`, `wiring.py`, `programs.py`, `exposure.py`, synced into `demo/py/` by `scripts/sync_browser_py.sh` and
+  checked by a test), runs your code to build a `Program`, and the weights execute on the WebGPU engine against a window
+  streamed from DANDI. Edit `kappa`, `tau0`, `sigma_um`, `scale`, swap in `vessels()`, or write the arrays yourself.
+  Measured: the default `cells` program built in 362 ms with the same 45 nonzero parameters as the torch-side export.
+  What Pyodide cannot do here: its package set has numpy, scipy, scikit-image, zarr, numcodecs, fsspec and aiohttp but no
+  torch, onnxruntime, tornado or neuroglancer, so the Python Neuroglancer server and the torch executor do not run there;
+  inference stays on WebGPU.
+* **Neuroglancer**: the hosted standalone viewer exposes `window.viewer`; on a probe against it, the view state was
+  readable (position, zoom, layers) and observable (about 118 change events), `restoreState` changed the view, and a local
+  annotation layer with ellipsoids persisted when it declared its own `(z, y, x)` output space (the viewer space is
+  `(t, z, y, x)`; a 3-D annotation in the wrong space is silently dropped). Hooking it from our own page needs our own
+  build (same-origin); the Python wheel's bundled client is the Python-integration build and cannot be hosted standalone.
+  GitHub Pages can host such a build (built in CI); that is not set up here.
+
+## Hand-written weights (`weights/fable/`)
+
+A subagent wrote three weight files by hand (no optimizer): `fable_blobs.json` (multi-scale nucleus / soma / cluster),
+`fable_vessels.json` (capillary / vessel / large, 72 heads, d = 95) and `fable_exposure.json`. They are numerically
+identical in the Python, JavaScript and WebGPU engines (<= 2.4e-5, class outputs exact) and are selectable in the viewer
+as experimental. Its own evaluation: blobs robust to contrast reduction and brightness shifts but conservative (about a
+third of visible nuclei marked at the default view); vessels weak on real LEC (phantom F1 0.41 at default exposure,
+20% of positives on round cells). Both are heavy (windows up to 240–285 µm): at level 0 the viewer must coarsen the
+level to fit device buffers, where blobs give almost nothing. See `weights/fable/NOTES.md`.
+
 ## Streaming, no bulk download
 
 `hwseg.data.StreamedZarr` and the demo read only the zarr chunks a crop intersects (HTTP GET per chunk from the
