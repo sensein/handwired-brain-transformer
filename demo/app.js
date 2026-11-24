@@ -143,10 +143,10 @@ function draw() {
   const l = rawLevel(), zl = clamp(Math.floor(view.z / 2 ** l), 0, zarr.levels[l].shape[0] - 1);
   drawGrid(l, (gy, gx) => rawTile(l, zl, gy, gx), 1, zarr.levels[l].chunks[1], zarr.levels[l].chunks[2]);
   const r = curRoute;
-  if (r && ['tissue', 'layers'].includes(r.kind)) {   // FOV-level programs: one forward pass over the visible region
-    if (fovSeg && fovSeg.model === r.model) { const f = fovSeg, sp = zarr.levels[f.level].sp, x0 = view.cx - W / 2 * view.p, y0 = view.cy - H / 2 * view.p;
+  if (r && fovSeg && fovSeg.model === r.model) {   // one forward pass over the visible region
+    { const f = fovSeg, sp = zarr.levels[f.level].sp, x0 = view.cx - W / 2 * view.p, y0 = view.cy - H / 2 * view.p;
       ctx.globalAlpha = +$('opacity').value / 100; ctx.drawImage(f.c, (f.x0 * sp[2] - x0) / view.p, (f.y0 * sp[1] - y0) / view.p, f.w * sp[2] / view.p + 0.6, f.h * sp[1] / view.p + 0.6); ctx.globalAlpha = 1; }
-  } else if (r && r.model !== 'none') {
+  } else if (r && r.model !== 'none' && !['tissue', 'layers'].includes(r.kind)) {
     const zs = clamp(Math.floor(view.z / 2 ** r.level), 0, zarr.levels[r.level].shape[0] - 1);
     drawGrid(r.level, (gy, gx) => segTiles.get(segKey(r.model, r.level, zs, gy, gx)) || null, +$('opacity').value / 100, TS, TS);
   }
@@ -184,26 +184,30 @@ async function segTile(prog, name, l, zl, gy, gx, fovWin) {
   return renderSegCanvas(modelIndex[name].kind, r);
 }
 
-async function refreshFov(prog, r, myGen) {
+async function refreshFov(prog, r, myGen, local = false) {
   const W = cv.width, H = cv.height, top = zarr.top, budget = engine ? Math.floor(engine.maxTokens(prog.d) * 0.6) : 150000;
   const ux0 = view.cx - W / 2 * view.p, ux1 = view.cx + W / 2 * view.p, uy0 = view.cy - H / 2 * view.p, uy1 = view.cy + H / 2 * view.p;
   let level = r.level, box, note = r.note || '';
   for (;;) {   // coarsest-needed level so that the whole FOV fits one forward pass
     const L = zarr.levels[level], sp = L.sp, [hz] = haloFor(prog, sp), zslab = Math.min(L.shape[0], 2 * hz + 1);
     box = [clamp(Math.floor(uy0 / sp[1]), 0, L.shape[1]), clamp(Math.ceil(uy1 / sp[1]), 0, L.shape[1]), clamp(Math.floor(ux0 / sp[2]), 0, L.shape[2]), clamp(Math.ceil(ux1 / sp[2]), 0, L.shape[2])];
-    if (zslab * (box[1] - box[0]) * (box[3] - box[2]) <= budget || level >= top) break; level++;
+    if (zslab * (box[1] - box[0]) * (box[3] - box[2]) <= budget || level >= top) break;
+    if (local) return false;                                   // local programs keep their own scale: fall back to tiles instead of coarsening
+    level++;
   }
-  if (box[1] <= box[0] || box[3] <= box[2]) { fovSeg = null; draw(); setStatus('FOV outside the volume', true); return; }
+  if (local && (box[1] <= box[0] || box[3] <= box[2])) return false;
+  if (box[1] <= box[0] || box[3] <= box[2]) { fovSeg = null; draw(); setStatus('FOV outside the volume', true); return true; }
   r.level = level; updateInfo(r);
   const L = zarr.levels[level], zl = clamp(Math.floor(view.z / 2 ** level), 0, L.shape[0] - 1), t0 = performance.now();
   counts.fov++;
   const ea = effAdj();
   const seg = await segRegion(zarr, engine, prog, level, zl, box[0], box[1], box[2], box[3], (v) => { const w = viewWin(v); return adjustLogVol(v, w[0], w[1], ea); }, { halo: false });
-  if (myGen !== gen) return;
+  if (myGen !== gen) return true;
   const stats = regionStats(r.kind, seg, L.sp);
   fovSeg = { model: r.model, level, c: renderSegCanvas(r.kind, seg), y0: box[0], x0: box[2], w: box[3] - box[2], h: box[1] - box[0], stats };
   segStats.clear(); segStats.set(`${zarr.base}|${r.model}|${level}|${zl}|fov`, stats);
   draw(); setStatus(`${r.model}: FOV forward pass at level ${level} (${fovSeg.w}x${fovSeg.h} voxels) in ${(performance.now() - t0).toFixed(0)} ms` + (note ? ' · ' + note : ''), !!note);
+  return true;
 }
 
 function updateViewWindow() {   // display window = percentiles over the raw tiles currently loaded for this view/level
@@ -231,7 +235,10 @@ async function refresh(opts = {}) {
   updateInfo(r);
   if (r.model === 'none' || (r.kind && !['tissue', 'layers'].includes(r.kind) && view.p > 14)) { draw(); setStatus(r.model === 'none' ? 'Raw only.' : r.note, true); return; }
   const prog = await getProgram(r.model); updateInfo(r);
-  if (['tissue', 'layers'].includes(r.kind)) return refreshFov(prog, r, myGen);
+  if (['tissue', 'layers'].includes(r.kind)) { await refreshFov(prog, r, myGen); return; }
+  fovSeg = null;
+  if (await refreshFov(prog, r, myGen, true)) return;          // the model sees exactly the FOV (statistics, window) when it fits in device memory
+  r.note = (r.note ? r.note + ' · ' : '') + 'FOV too large for device memory: tiles with per-tile statistics';
   const x0 = view.cx - W / 2 * view.p, y0 = view.cy - H / 2 * view.p, x1 = view.cx + W / 2 * view.p, y1 = view.cy + H / 2 * view.p;
   const nx = Math.ceil(L.shape[2] / TS), ny = Math.ceil(L.shape[1] / TS);
   const gx0 = clamp(Math.floor(x0 / sp[2] / TS), 0, nx - 1), gx1 = clamp(Math.floor(x1 / sp[2] / TS), 0, nx - 1), gy0 = clamp(Math.floor(y0 / sp[1] / TS), 0, ny - 1), gy1 = clamp(Math.floor(y1 / sp[1] / TS), 0, ny - 1);
@@ -269,7 +276,7 @@ async function refresh(opts = {}) {
 function segSummary() {   // mean stats over the segmented tiles of the current route/plane (for automated evaluation)
   const r = curRoute; if (!r || r.model === 'none') return null;
   const zs = clamp(Math.floor(view.z / 2 ** r.level), 0, zarr.levels[r.level].shape[0] - 1), pre = `${zarr.base}|${r.model}|${r.level}|${zs}|`, acc = {}; let n = 0;
-  if (['tissue', 'layers'].includes(r.kind) && fovSeg) return { model: r.model, level: fovSeg.level, tiles: 1, ...fovSeg.stats };
+  if (fovSeg && fovSeg.model === r.model) return { model: r.model, level: fovSeg.level, tiles: 1, ...fovSeg.stats };
   for (const [k, st] of segStats) if (k.startsWith(pre)) { n++; for (const [a, b] of Object.entries(st)) acc[a] = (acc[a] || 0) + b; }
   for (const a in acc) acc[a] /= n; return { model: r.model, level: r.level, tiles: n, ...acc };
 }

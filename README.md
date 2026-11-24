@@ -33,9 +33,14 @@ Every program takes the **display image** `u'` in [0, 1] as its input channel, n
 change what the model sees, across the whole slab in view, and the window `[lo, hi]` is a property of the
 field of view, not of a tile or a level. The default exposure comes from a program (`exposure`, below).
 
-The models are **view-dependent**: the in-context statistics (global heads) are computed over the field of view and the
-depth slab in view, nothing outside it. Tissue and layers run as one forward pass over the visible region (no tile grid,
-no seams); cells and vessels are purely local, so tiling them is only a memory optimization.
+The models are **view-dependent**: the model sees exactly the fetched field of view and the depth slab in view, and its
+in-context statistics (global heads) and the exposure window come from that region alone. Zooming in shrinks the FOV and
+moves to a finer pyramid level (fewer, finer voxels); zooming out grows it and moves to coarser levels, so cost follows
+the screen, not the data. Every program runs as **one forward pass over the FOV**. Only when the FOV does not fit in the
+device's storage-buffer limit do cells / vessels fall back to tiles with per-tile statistics (the status line says so);
+tissue and layers coarsen the level instead. Measured with Playwright (`demo/test/fov_zoom_test.mjs`), zooming
+6 → 3 → 1.5 → 0.75 µm/px fetched 570×268 → 570×268 (level 1 → 0) → 286×134 → 144×68 voxels, and zooming out to the whole slab
+fetched 597×64 voxels at level 5 in one pass.
 
 ## Programs
 
