@@ -113,7 +113,8 @@ axis, not a trained outcome: for vessels, direction count trades accuracy for si
   image layer uses a shader that reproduces our display pipeline (log window from the exposure program, contrast,
   brightness, gamma sliders). Hard-won specifics: the annotation layer must be declared in the viewer's own (t, z, y, x)
   space (any other space reorders the global dimensions and resets the view); `restoreState` alone leaves a broken display
-  plane, so the hook calls `state.reset()` first. `demo/test/ng_bridge_test.mjs` is the end-to-end test.
+  plane, so the hook calls `state.reset()` first. Tissue results are drawn as contour lines (Neuroglancer annotations have no region type): a
+  tissue outline and a gray/white boundary, each its own annotation layer styled with a thin-line annotation shader. `demo/test/ng_bridge_test.mjs` is the end-to-end test.
 
 ## Hand-written weights (`weights/fable/`)
 

@@ -11,15 +11,15 @@ const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '
 const page = await browser.newPage({ viewport: { width: 1300, height: 800 } });
 page.on('pageerror', (e) => console.log('[pageerror]', e.message.slice(0, 200)));
 const sp = [2.5632620818012344, 3.625, 2.5632620818012344];
-const state = ngState([ASSET], { sp, off: [180247 , 26568, -237] }, { cx: 24818 * sp[2], cy: 1023 * sp[1], z: 1019, p: 3.1 });
+const state = ngState([ASSET], { sp, off: [180247 , 26568, -237] }, { cx: 24818 * sp[2], cy: 1023 * sp[1], z: 1019, p: +(process.env.P || 3.1) });
 await page.goto(`http://localhost:${PORT}/ng/index.html#!${encodeURIComponent(JSON.stringify(state))}`);
 await page.waitForFunction(() => window.__hwNg && window.__hwNg.run, null, { timeout: 120000 });
 console.log('hook ready:', await page.evaluate(() => window.__hwNg.status));
 await page.waitForTimeout(8000);
 await page.screenshot({ path: `${OUT}/ng_before.png` });
-await page.click('#hw-run');
+await page.selectOption('#hw-m', process.env.MODEL || 'cells'); await page.click('#hw-run');
 const t0 = Date.now(); let st = '';
-while (Date.now() - t0 < 240000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/detections|error/.test(st)) break; }
+while (Date.now() - t0 < 240000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/detections|segments|error/.test(st)) break; }
 console.log('status:', st, `(${((Date.now() - t0) / 1000).toFixed(0)} s)`);
 const res = await page.evaluate(() => { const j = window.viewer.state.toJSON(), l = (j.layers || []).find((x) => x.name === 'hwseg detections'); const img = j.layers.find((x) => x.type === 'image'); return { shaderControls: img && img.shaderControls, position: j.position, scale: j.crossSectionScale, last: window.__hwNg.last, layers: j.layers.map((x) => x.name + ':' + x.type + (x.annotations ? '(' + x.annotations.length + ')' : '')), displayDimensions: j.displayDimensions, first: l && l.annotations && l.annotations[0] }; });
 console.log(JSON.stringify(res));
