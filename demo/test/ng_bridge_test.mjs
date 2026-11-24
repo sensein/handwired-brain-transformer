@@ -17,7 +17,7 @@ await page.waitForFunction(() => window.__hwNg && window.__hwNg.run, null, { tim
 console.log('hook ready:', await page.evaluate(() => window.__hwNg.status));
 await page.waitForTimeout(8000);
 await page.screenshot({ path: `${OUT}/ng_before.png` });
-await page.selectOption('#hw-m', process.env.MODEL || 'cells'); await page.click('#hw-run');
+await page.selectOption('#hw-m', process.env.MODEL || 'cells'); if (process.env.DEPTH) await page.evaluate((d) => window.__hwNg.setDepth(d), process.env.DEPTH); await page.click('#hw-run');
 const t0 = Date.now(); let st = '';
 while (Date.now() - t0 < 720000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/detections|segments|detections|error/.test(st)) break; }
 console.log('status:', st, `(${((Date.now() - t0) / 1000).toFixed(0)} s)`);

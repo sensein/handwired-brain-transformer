@@ -92,19 +92,29 @@ function components(seg, dims, ox, oy, w, h) {
   return out;
 }
 
-// ---- 3-D connected components (6-neighbourhood) over a slab of the segmentation -> centroid + per-axis radii.
-// For a solid ellipsoid the variance along an axis is r^2/5, so r = sqrt(5 var) (plus half a voxel for single-plane extents).
+// ---- 3-D objects = per-plane 2-D blobs linked across z.
+// A 3-D connected-component pass merges touching cells (columns of neighbours become one tall ellipsoid), so each plane is split into
+// 2-D components first and components in adjacent planes are linked when their centres overlap. A track ends where its area dips
+// below 60% of its peak and rises again (two cells stacked in z). Object centre/z extent are area-weighted over the track;
+// the in-plane radius comes from the largest cross-section, the z radius from the area-weighted z spread (r = sqrt(5 var)).
 function components3(seg, dims, ox, oy, w, h, nz) {
-  const plane = dims[1] * dims[2], n = nz * h * w, mask = new Uint8Array(n), seen = new Uint8Array(n), out = [];
-  for (let z = 0; z < nz; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) mask[(z * h + y) * w + x] = seg[z * plane + (oy + y) * dims[2] + ox + x] > 0.5 ? 1 : 0;
-  const nb = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-  for (let i = 0; i < n; i++) if (mask[i] && !seen[i]) {
-    let c = 0, sx = 0, sy = 0, sz = 0, qx = 0, qy = 0, qz = 0, zmin = nz, zmax = -1; const st = [i]; seen[i] = 1;
-    while (st.length) { const j = st.pop(), x = j % w, y = ((j / w) | 0) % h, z = (j / (w * h)) | 0; c++; sx += x; sy += y; sz += z; qx += x * x; qy += y * y; qz += z * z; if (z < zmin) zmin = z; if (z > zmax) zmax = z;
-      for (const [dx, dy, dz] of nb) { const xx = x + dx, yy = y + dy, zz = z + dz; if (xx < 0 || yy < 0 || zz < 0 || xx >= w || yy >= h || zz >= nz) continue; const k = (zz * h + yy) * w + xx; if (mask[k] && !seen[k]) { seen[k] = 1; st.push(k); } } }
-    if (c < 3) continue;
-    const mx = sx / c, my = sy / c, mz = sz / c, rad = (q, m) => Math.sqrt(5 * Math.max(q / c - m * m, 0) + 0.25);
-    out.push({ x: mx, y: my, z: mz, rx: rad(qx, mx), ry: rad(qy, my), rz: rad(qz, mz), vox: c, edgeZ: zmin === 0 || zmax === nz - 1 });
+  const plane = dims[1] * dims[2], tracks = []; let open = [];
+  for (let z = 0; z < nz; z++) {
+    const cs = components(seg.subarray(z * plane, (z + 1) * plane), dims, ox, oy, w, h), next = [], taken = new Set();
+    const cand = []; for (let ci = 0; ci < cs.length; ci++) for (let ti = 0; ti < open.length; ti++) { const c = cs[ci], t = open[ti], l = t.pl[t.pl.length - 1], dd = Math.hypot(c.x - l.x, c.y - l.y); if (dd < 0.75 * Math.max(c.r, l.r)) cand.push([dd, ci, ti]); }
+    cand.sort((p, q) => p[0] - q[0]); const cDone = new Set();
+    for (const [, ci, ti] of cand) { if (cDone.has(ci) || taken.has(ti)) continue; const c = cs[ci], t = open[ti], l = t.pl[t.pl.length - 1], pk = Math.max(...t.pl.map((p) => p.r));
+      if (l.r < 0.6 * pk && c.r > 1.3 * l.r) continue;                         // valley then rise: a different cell
+      t.pl.push({ ...c, z }); cDone.add(ci); taken.add(ti); next.push(t); }
+    for (let ci = 0; ci < cs.length; ci++) if (!cDone.has(ci)) { const t = { pl: [{ ...cs[ci], z }] }; tracks.push(t); next.push(t); }
+    open = next;
+  }
+  const out = [];
+  for (const t of tracks) {
+    let A = 0, sx = 0, sy = 0, sz = 0, qz = 0, rmax = 0, nv = 0;
+    for (const p of t.pl) { const a_ = p.r * p.r * Math.PI; A += a_; sx += a_ * p.x; sy += a_ * p.y; sz += a_ * p.z; qz += a_ * p.z * p.z; rmax = Math.max(rmax, p.r); nv += a_; }
+    const mz = sz / A, vz = Math.max(qz / A - mz * mz, 0);
+    out.push({ x: sx / A, y: sy / A, z: mz, rx: rmax, ry: rmax, rz: Math.sqrt(5 * vz + 0.25), vox: nv, edgeZ: t.pl[0].z === 0 || t.pl[t.pl.length - 1].z === nz - 1, planes: t.pl.length });
   }
   return out;
 }
