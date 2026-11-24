@@ -13,7 +13,7 @@ const $ = (id) => document.getElementById(id);
 // ------------------------------------------------------------------------------------------ state
 const assets = await (await fetch('assets.json')).json();
 const modelIndex = await (await fetch('models/index.json')).json();
-const MODEL_LABEL = { fable_blobs: 'EXPERIMENTAL hand-written cells: nucleus / soma / cluster (heavy)', fable_vessels: 'EXPERIMENTAL hand-written vessels: capillary / vessel / large (heavy, weak on LEC)', tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
+const MODEL_LABEL = { fable_blobs_v2: 'Hand-written cells v2: nucleus / soma (levels 0-1, cheap)', fable_vessels_v2: 'Hand-written vessels v2: capillary / vessel (levels 0-1, LEC only)', fable_blobs: 'EXPERIMENTAL hand-written cells: nucleus / soma / cluster (heavy)', fable_vessels: 'EXPERIMENTAL hand-written vessels: capillary / vessel / large (heavy, weak on LEC)', tissue: 'Tissue (bg / gray / white)', layers: 'Cortical layers I-VI (experimental, unreliable on real slabs)', cells: 'Cells (nuclei / somata)', vessels_13dir: 'Vessels, 13 directions', vessels_26dir: 'Vessels, 26 directions' };
 const programs = {};
 async function getProgram(name) { return programs[name] ||= parseProgram(await (await fetch(`models/${modelIndex[name].file}`)).text()); }
 
@@ -273,7 +273,7 @@ async function refresh(opts = {}) {
   updateInfo(r);
   if (r.model === 'none' || (r.kind && !['tissue', 'layers'].includes(r.kind) && view.p > 14)) { draw(); setStatus(r.model === 'none' ? 'Raw only.' : r.note, true); return; }
   const prog = await getProgram(r.model); updateInfo(r);
-  if (['tissue', 'layers'].includes(r.kind) || FAMILIES[r.family].invariant) { await refreshFov(prog, r, myGen); return; }   // scale-invariant programs may coarsen the level until the FOV fits
+  if (['tissue', 'layers'].includes(r.kind) || (FAMILIES[r.family].invariant && !FAMILIES[r.family].fineOnly)) { await refreshFov(prog, r, myGen); return; }   // scale-invariant programs may coarsen the level until the FOV fits
   fovSeg = null;
   if (await refreshFov(prog, r, myGen, true)) return;          // the model sees exactly the FOV (statistics, window) when it fits in device memory
   r.note = (r.note ? r.note + ' · ' : '') + 'FOV too large for device memory: tiles with per-tile statistics';
@@ -432,7 +432,7 @@ async function build3DInner(bt) {
         $('v3status').textContent = `Running ${m} on the volume (${dims.join('x')})...`;
         const ea = effAdj();
         const sv = await segVolume(zarr, engine, prog, l, z0, z1, box[0], box[1], box[2], box[3], (v) => adjustLogVol(v, win[0], win[1], ea), { halo: false });
-        last3d.labels = labelVolume(kind, sv); last3d.palette = paletteFor(kind);
+        last3d.labels = labelVolume(kind, sv); last3d.palette = paletteFor(kind, sv.out);
         note = ` · ${m} on level ${l}` + (r.level !== l ? ` (its native level is ${r.level}: scale mismatch)` : '');
       }
     }

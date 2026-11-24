@@ -271,3 +271,168 @@ d) Biology. Blob size classes follow apparent size (blurred YO nuclei of ~12 um 
 * The scale gate reads kernel variance from r^2 channels in float32; verified only through the Python FFT path.
 * Exposure: lo is off by up to 1.1 log units on two crops with a long dark tail (NN_14_L3, L5).
 
+
+# Round 2: cheap fine-scale programs (fable_blobs_v2.json, fable_vessels_v2.json)
+
+Brief: level-0 FOV pass of ~500x300 voxels must fit the viewer buffer (demo/app.js: slab * H * W <= 0.6 * 128 MB / 4 / d,
+slab = 2*halo_z + 1, halo = sum over layers of the largest window radius in voxels); more visible nuclei / somata;
+vessels with higher precision. Both banks used: strip bank (.../fable/bank) and stitched bank (.../fable/slabbank),
+levels 0 and 1. Generators: make_blobs_v2.py, make_vessels_v2.py; iteration script run_r2.sh (weights for each
+iteration under /orcd/scratch/bcs/002/satra/hwseg-tmp/fable/out/r2_N/). `fable_check.py cost` prints the buffer numbers.
+
+Design decisions that make it cheap: ONE layer with local attention (everything else is global heads or MLPs, which add
+no halo); z window 5 um (blobs: 2 voxels at L0 -> 5-plane slab) or 1 voxel (vessels: 3-plane slab); in-plane windows
+<= 30-36 um; d = 25 (blobs) / 37 (vessels) by recycling dead channels. Vessel filters are in-plane only (6 directions
+x 2 scales), so through-plane vessels are not detected by design.
+
+## Iteration log (round 2)
+
+### r2-1 (blobs d=23, vessels d=35): v1 logic squeezed into one local layer
+Blobs: sigma 3/6/12, threshold 4x / 3x FOV mean |band|. Slab montage (YO_117, YO_90, new stitched data with dense crisp
+nuclei): only ~10% of the visible nuclei marked; in a dense field the mean |band| is the nuclei themselves, so a
+response-relative threshold defeats itself. Phantom base 0.56 (halo of the wider band).
+Vessels: 6 in-plane directions x sigma_t 3/6, same min(strength, anisotropy) rule, kappa 18. LEC slab montage: clean
+elongated marks on vessel segments at L0 and L1, perhaps a third of the visible ones. Phantom P 0.23 R 0.54.
+
+### r2-2: noise-relative threshold
+Added a 1-voxel box head (flat kernel, minimum window) and HP = |u' - box|: the FOV mean of HP measures voxel-scale
+roughness (noise) and is not raised by nuclei, which are several voxels wide. Threshold = C * mean HP (C = 0.75 = 4 sd of
+band 0 for white noise at L0; vessels 0.7 / 0.5), floors as before.
+Blobs: phantom base 0.94 / c0.5 0.94 / b-0.15 0.94 / g2 0.69 / c2 0.65 / g0.5 0.55 / b+0.15 0.72 (recall drops where the
+saturated cells cannot grow with the noise). Slab montages: every nucleus / soma is covered, but at L0 the marks merge
+into clumps (20-25% of the slice, labelled soma); NN noise-only crop 0.2%; at NN_86 L1 the nucleus band (sigma 3) was
+not gated and speckles a dark texture.
+Vessels: phantom P 0.57 R 0.50, background positives 1%; LEC slab: most visible segments marked at L0 and L1, wall of
+the big vessel traced, marks fatter than the vessels. But c0.5 IoU 0.32-0.41 and detection grows 2-4x at c >= 2.
+
+### r2-3 (blobs d=25)
+Blobs: additive signal term (threshold = 0.6 * mean HP + 1.25 / 1.5 * FOV mean |band|) so only blob cores pass and
+neighbours separate; gate ratio 0.85 -> 0.93. Slab YO: nuclei marked individually at L0 (8-12% of the slice), fewer at
+L1 (3-7%). Phantom unchanged (0.94 base).
+
+### r2-4
+Blobs: kappa band 1 1.5 -> 1.2 (L1 recall), flat-view floor made steeper (0.05 - 2*MAD) so it only acts when MAD < 0.025.
+Strip bank NN_40_L0/L1: all visible somata marked; noise crop NN_14_L0 0.1%. robust mean IoU strip / slab bank:
+c0.5 0.85 / 0.93, c2 0.54 / 0.67, c4 0.40 / 0.57, g0.5 0.52 / 0.64, g2 0.58 / 0.73, b+0.15 0.95 / 0.97, b-0.15 0.75 / 0.85;
+flat 0. YO_122_L0 detected fraction 4.76 / 4.90 / 4.81 / 4.93 % at c = 0.5 / 1 / 2 / 4 (plateau).
+Vessels (r2-3): floor fix + ZETA 0.5: c0.5 IoU 0.54-0.57 (absolute 0.01 floor still dominates dim crops).
+Vessels (r2-4): absolute floor 0.002, additive anisotropy term kappa 6, ZETA 0.3: c0.5 IoU 0.90-0.93, phantom P 0.84
+R 0.40 F1 0.53 but c2 0.17 / g0.5 0.22 (too strict once the noise doubles).
+
+### r2-5
+Blobs: floor 0.025 -> 0.02, kappa band 0 1.25 -> 1.1: c0.5 IoU 0.92 / 0.95, phantom base 0.94, c2 0.73, g0.5 0.60, g2 0.67,
+b+ 0.77, b- 0.93; classes: balls <= 8 um nucleus, 10 um mixed, >= 12 um soma.
+Vessels: C 0.4 / 0.3, class weights 1 : 1.5: phantom precision fell to 0.27 (too permissive), tubes <= 8 um now capillary,
+>= 12 um vessel. -> go back up with C (next).
+
+### r2-6
+Vessels: C 0.55 / 0.4, kappa 4: phantom P 0.46 R 0.51 (F1 0.46-0.53 in every view except gamma 2, 0.16). Slab LEC
+montage: essentially every visible segment marked at L0 and L1, but the marks are much fatter than the vessels and merge
+(15% of the slice in dense fields).
+Blobs: looked at adjusted views of r2-5 on the stitched bank. c=2: sensible (visible somata marked, empty crop 0.7%).
+Dark view (b=-0.5, c=0.5): the image is almost black, yet 13% of YO_90_L0_w0 was marked with fat marks: clipping
+removes the noise, both relative terms vanish and the floor 0.02 is all that is left. Change: darkness floor
+0.10 - 1.25 * FOV mean of u' (acts only when the FOV mean is below 0.08). After: b=-0.5 gives 0 up to c=0.5 on all four
+strip crops; the dark montage shows marks only on the brightest cores of the one crop where nuclei are still visible.
+
+### r2-7
+Vessels: footprint trim. Third term in the min: response <= 3 * (box3(u') - E_d), i.e. the voxel itself must be at
+least as bright as the oriented mean through it. "Outside" marks around clean tubes fell from 2-10% to < 1%; phantom
+P 0.50 R 0.48; contrast growth milder (LEC_165_L0 3.9% -> 5.6% at c=4, was 6.6 -> 12.4).
+Blobs: class weight 3.5 -> 2.8: balls <= 10 um nucleus, >= 12 um soma. Strip YO montage: most bright nuclei marked at
+L0 and L1 (was about a third in v1); at YO_122_L1 a few marks sit on the bright rim of a crack (no local-statistics
+head in the cheap version).
+
+### r2-8 / r2-9 (vessels)
+r2-8: same darkness floor as blobs. Slab LEC montage: slim marks that follow the segments (8% instead of 15% in the
+densest crop); bright round cross-sections are still marked; in the dim LEC_56_L1_w0 crop small ring-shaped marks
+appear on faint dots. The floor hurt dim LEC crops (slab IoU c2 0.31, b-0.15 0.47).
+r2-9: darkness floor lowered to 0.06 - 1.25 * mean (acts below 0.048): slab IoU c2 0.36, g2 0.41, b-0.15 0.63.
+
+### r2-10 (vessels, rejected)
+Seen in the final check: run on NeuN crops (stitched bank, L0) the vessels program marks 4-10% of the slice, mostly on
+somata (many are elongated or touch a neighbour). Tried blob penalties ETA 0.3 -> 0.55, ETA2 0.5 -> 0.8: somata marks
+only fell to 2.5-7%, while phantom vessel recall halved (F1 0.49 -> 0.30) and clean 6-10 um tubes lost the capillary
+class. Not adopted; the final file keeps the r2-9 numbers.
+
+## Round 2 final (files fable_blobs_v2.json, fable_vessels_v2.json; run_r2final.sh reproduces the tables)
+
+| file | d | layers | heads (global) | ReLU units | nonzero | local layers | largest window (z, y, x) um |
+|---|---|---|---|---|---|---|---|
+| fable_blobs_v2.json | 25 | 6 | 11 (5) | 29 | 180 | 1 | 5, 30, 30 |
+| fable_vessels_v2.json | 37 | 8 | 21 (5) | 81 | 565 | 1 | 2.5, 36, 36 |
+
+Buffer cost for a 500 x 300 voxel FOV pass (rule of demo/app.js: slab * H * W <= 0.6 * 128 MB / 4 / d, slab = 2*halo_z+1):
+
+| program | level | halo z,y,x (voxels) | slab | tokens | tokens*d*4 B | incl. in-plane halo | viewer budget (tokens) |
+|---|---|---|---|---|---|---|---|
+| blobs_v2 | 0 | 2, 9, 12 | 5 | 750,000 | 72 MB | 79 MB | 805,306: fits |
+| blobs_v2 | 1 | 1, 5, 6 | 3 | 450,000 | 43 MB | 45 MB | fits |
+| vessels_v2 | 0 | 1, 10, 15 | 3 | 450,000 | 64 MB | 72 MB | 544,125: fits |
+| vessels_v2 | 1 | 1, 5, 8 | 3 | 450,000 | 64 MB | 68 MB | fits |
+(v1 for comparison: blobs d=51 with a 240 um window, vessels d=95 with 285 um: ~100-voxel halo at level 0.)
+
+Phantom F1 of seg (scripts/fable_eval.py --phantom)
+
+| view | blobs_v2 (cells) | blobs v1 | vessels_v2 (vessels) | vessels v1 |
+|---|---|---|---|---|
+| base | 0.94 | 0.76 | 0.49 | 0.41 |
+| c0.5 | 0.94 | 0.79 | 0.49 | 0.54 |
+| c2 | 0.73 | 0.75 | 0.40 | 0.70 |
+| g0.5 | 0.60 | 0.89 | 0.45 | 0.73 |
+| g2 | 0.67 | 0.33 | 0.28 | 0.15 |
+| b+0.15 | 0.77 | 0.86 | 0.48 | 0.65 |
+| b-0.15 | 0.93 | 0.69 | 0.49 | 0.39 |
+| c0.1 | nothing | nothing | nothing | nothing |
+blobs_v2 base: precision 0.93, recall 0.95. vessels_v2 base: precision 0.50 (v1 0.26), recall 0.48; 89% of positives
+within a voxel of a vessel, 10% on the round cells, 1% background. Recall is limited because the 6 directions are
+in-plane: phantom vessels that cross the 3-plane slab are not seen (clean tubes: 0% for two of four test orientations).
+On the cells-only phantom the vessels program overlaps cells with F1 0.07 (v1 0.13).
+
+IoU of seg vs the default view, mean over crops (levels 0 and 1)
+
+| view | blobs_v2 strip bank (8) | blobs_v2 stitched bank (24)* | vessels_v2 strip (4) | vessels_v2 stitched (12) |
+|---|---|---|---|---|
+| c0.5 | 0.92 | 0.95 | 0.85 | 0.82 |
+| c2 | 0.55 | 0.66 | 0.51 | 0.36 |
+| c4 | 0.39 | 0.57 | 0.31 | 0.22 |
+| g0.5 | 0.52 | 0.65 | 0.66 | 0.71 |
+| g2 | 0.55 | 0.70 | 0.63 | 0.41 |
+| b+0.15 | 0.95 | 0.97 | 0.99 | 0.99 |
+| b-0.15 | 0.76 | 0.81 | 0.81 | 0.63 |
+| c0.1 | 0 detected | 0 detected | 0 detected | 0 detected |
+* the stitched-bank blobs column is from iteration r2-6, whose seg is identical to the final file (only the class
+weight changed afterwards); the final-file job printed 14 of 24 crops before the 15 min limit and those rows agree
+(YO crops: c0.5 0.91-0.99, c2 0.53-0.83).
+
+Detected fraction at brightness 0, contrast 0.1 / 0.25 / 0.5 / 1 / 2 / 4 (blobs_v2, final file):
+phantom 0 / 0.15 / 0.15 / 0.15 / 0.09 / 0.07; YO_122_L0 0 / 2.10 / 5.02 / 5.18 / 5.13 / 5.24; YO_123_L0 0 / 1.01 / 3.09 / 3.25 /
+5.76 / 7.10; NN_40_L0 0 / 3.59 / 6.99 / 7.14 / 9.06 / 7.22. Brightness -0.5: 0 up to c = 0.5 in all four.
+Brightness +0.5 is not "washed out" for these crops (somata stay visible) and they stay marked (NN_40_L0 7.5%).
+vessels_v2 (same constants, measured at r2-9): LEC_165_L0 0 / 2.40 / 3.30 / 3.89 / 5.08 / 5.57; LEC_97_L0 0 / 2.36 / 2.88 /
+3.13 / 5.18 / 1.57; brightness -0.5: 0 up to c = 0.5.
+
+Classes: balls <= 10 um nucleus, >= 12 um soma (blobs_v2 has no cluster output). Tubes: 4 um 26% capillary / 29% vessel,
+6-8 um mostly vessel (55-64%), >= 10 um vessel; clean balls 8 um 0%, 12 um 20%, 16 um 24%, 24 um 46% marked.
+
+What the montages show (figs/r2_*)
+* YO, both banks: most bright nuclei carry their own mark at L0 and L1 (v1: about a third); detected fraction 3-5% on
+  the strip crops, 5-15% on the dense stitched crops. NN: nearly every visible soma marked at L0 and L1; the noise-only
+  crops stay at 0.2-0.5%.
+* LEC stitched bank: slim marks along most visible vessel segments at L0 and L1, the wall of the large vessel is traced.
+* Dark view (b -0.5, c 0.5): nothing, except thin cores in the one crop where gray nuclei are still visible.
+
+Limitations (round 2)
+* Levels 0 and 1 only: at level 2 and coarser every scale is gated off and both programs return nothing; the v1 files
+  remain the coarse-level option. No cluster / large classes.
+* blobs_v2 has no local-statistics head (it would need a second local layer): at YO_122_L1 a few marks sit on the bright
+  rim of a crack. Marks at L1 are only 1-3 voxels wide.
+* Contrast >= 2 and gamma still change the mask (IoU 0.4-0.7); a crop that is mostly noise can gain or lose nearly
+  all of its few marks (NN_14_L1, NN_86_L1_w0).
+* vessels_v2 does NOT reject real somata: on NeuN crops it marks 4-10% of the slice. It must only be routed to LEC.
+  Bright round vessel cross-sections in LEC are marked too.
+* vessels_v2 is in-plane: vessels crossing the slab are missed; capillary class is weak (most real marks are "vessel").
+* Dim LEC crops (LEC_56): at c = 2 or brightness -0.15 the clipped view falls under the darkness floor and nearly all
+  marks disappear (IoU 0.0-0.2 for those crops).
+* Verified only through the Python FFT path; the JS / WebGPU engines were not run on the v2 files. The 1-voxel box head
+  relies on the minimum-window rule (radius >= 1 voxel), which both engines implement.

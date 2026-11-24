@@ -257,5 +257,41 @@
    "hi"
   ],
   "author": "fable (hand-written weights)"
+ },
+ "fable_blobs_v2": {
+  "file": "fable_blobs_v2.json",
+  "kind": "blobs",
+  "dense": 4229,
+  "nonzero": 180,
+  "heads": 11,
+  "layers": 6,
+  "tile": 128,
+  "family": "fable_blobs_v2",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "seg",
+   "nucleus",
+   "soma"
+  ],
+  "author": "fable (hand-written weights)"
+ },
+ "fable_vessels_v2": {
+  "file": "fable_vessels_v2.json",
+  "kind": "vessels_ms",
+  "dense": 13845,
+  "nonzero": 565,
+  "heads": 21,
+  "layers": 8,
+  "tile": 128,
+  "family": "fable_vessels_v2",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "seg",
+   "capillary",
+   "vessel"
+  ],
+  "author": "fable (hand-written weights)"
  }
 }

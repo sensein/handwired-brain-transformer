@@ -14,7 +14,7 @@ const viewer = window.viewer;
 
 // ---- small UI
 const box = el('div', 'position:fixed;left:8px;bottom:8px;z-index:9999;background:rgba(20,21,26,.92);color:#e8e8e4;font:12px/1.4 system-ui;padding:8px 10px;border:1px solid #444;border-radius:8px;max-width:340px');
-box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="cells">cells (nuclei)</option><option value="vessels_26dir">vessels</option><option value="tissue">tissue + gray/white boundary (contours)</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
+box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="tissue">tissue + gray/white boundary (contours)</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
 document.body.append(box);
 const say = (t) => { document.getElementById('hw-s').textContent = t; window.__hwNg.status = t; };
 window.__hwNg = { status: '', runs: 0 };

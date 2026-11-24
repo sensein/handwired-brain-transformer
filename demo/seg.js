@@ -44,6 +44,7 @@ export const CLASSES = { tissue: ['bg', 'gray', 'white'], layers: ['bg', 'L1', '
 // Scale-invariant detectors with size classes: 'seg' gates, the class channels colour by size / type.
 export const MULTI = { blobs: ['nucleus', 'soma', 'cluster'], vessels_ms: ['capillary', 'vessel', 'large'] };
 export const MULTI_COLORS = { nucleus: [255, 60, 200], soma: [255, 170, 40], cluster: [120, 200, 255], capillary: [40, 220, 255], vessel: [80, 255, 120], large: [255, 230, 60] };
+export const multiNames = (kind, out) => MULTI[kind].filter((n) => out[n] !== undefined);   // v2 programs have no cluster / large channel
 const argmaxAt = (out, names, i) => { let b = 0, bv = -Infinity; for (let k = 0; k < names.length; k++) { const v = out[names[k]][i]; if (v > bv) { bv = v; b = k; } } return b; };
 
 export function renderSegCanvas(kind, r) {
@@ -51,7 +52,7 @@ export function renderSegCanvas(kind, r) {
   return toCanvas(null, w, h, (px) => {
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const i = (oy + y) * dims[2] + ox + x, o = 4 * (y * w + x);
-      if (MULTI[kind]) { if (out.seg[i] > 0.5) { const c = MULTI_COLORS[MULTI[kind][argmaxAt(out, MULTI[kind], i)]]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 230; } }
+      if (MULTI[kind]) { if (out.seg[i] > 0.5) { const mn = multiNames(kind, out), c = MULTI_COLORS[mn[argmaxAt(out, mn, i)]]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = 230; } }
       else if (CLASSES[kind]) { const a = argmaxAt(out, CLASSES[kind], i), c = COLORS[CLASSES[kind][a]]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = a === 0 ? 150 : 200; }
       else { const v = clamp(out.seg[i], 0, 1), c = kind === 'vessels' ? [40, 220, 255] : [255, 60, 200]; px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = v * 255; }
     }
@@ -66,11 +67,11 @@ export function regionStats(kind, r, sp) {
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) c[argmaxAt(out, names, (oy + y) * dims[2] + ox + x)]++;
     return Object.fromEntries(names.map((nm, k) => [nm, c[k] / n]));
   }
-  const cls = MULTI[kind] ? new Array(MULTI[kind].length).fill(0) : null;
+  const mn = MULTI[kind] ? multiNames(kind, out) : null, cls = mn ? new Array(mn.length).fill(0) : null;
   let on = 0; const mask = new Uint8Array(n);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (out.seg[(oy + y) * dims[2] + ox + x] > 0.5) { mask[y * w + x] = 1; on++; if (cls) cls[argmaxAt(out, MULTI[kind], (oy + y) * dims[2] + ox + x)]++; }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (out.seg[(oy + y) * dims[2] + ox + x] > 0.5) { mask[y * w + x] = 1; on++; if (cls) cls[argmaxAt(out, mn, (oy + y) * dims[2] + ox + x)]++; }
   if (kind === 'vessels') return { area_frac: on / n };
-  if (kind === 'vessels_ms') return { area_frac: on / n, ...Object.fromEntries(MULTI[kind].map((nm, k) => [nm, on ? cls[k] / on : 0])) };
+  if (kind === 'vessels_ms') return { area_frac: on / n, ...Object.fromEntries(mn.map((nm, k) => [nm, on ? cls[k] / on : 0])) };
   // 2D connected components (4-neighbour) -> cell count in this plane
   let cc = 0; const seen = new Uint8Array(n), st = [];
   for (let i = 0; i < n; i++) if (mask[i] && !seen[i]) {
@@ -78,7 +79,7 @@ export function regionStats(kind, r, sp) {
     while (st.length) { const j = st.pop(), x = j % w, y = (j / w) | 0;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue; const k = yy * w + xx; if (mask[k] && !seen[k]) { seen[k] = 1; st.push(k); } } }
   }
-  return { cells_per_mm2: cc / areaMm2, area_frac: on / n, ...(cls ? Object.fromEntries(MULTI[kind].map((nm, k) => [nm, on ? cls[k] / on : 0])) : {}) };
+  return { cells_per_mm2: cc / areaMm2, area_frac: on / n, ...(cls ? Object.fromEntries(mn.map((nm, k) => [nm, on ? cls[k] / on : 0])) : {}) };
 }
 
 // Segment every plane of [z0,z1) over the region (view-dependent: halo=false means in-plane context is the FOV only).
@@ -100,14 +101,14 @@ export function labelVolume(kind, r) {
   const { out, dims, ox, oy, w, h, nz, plane } = r, lab = new Uint8Array(nz * h * w), names = CLASSES[kind];
   for (let z = 0; z < nz; z++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = z * plane + (oy + y) * dims[2] + ox + x, o = (z * h + y) * w + x;
-    if (MULTI[kind]) lab[o] = out.seg[i] > 0.5 ? 1 + argmaxAt(out, MULTI[kind], i) : 0;
+    if (MULTI[kind]) lab[o] = out.seg[i] > 0.5 ? 1 + argmaxAt(out, multiNames(kind, out), i) : 0;
     else if (names) { let b = 0, bv = -Infinity; for (let k = 0; k < names.length; k++) { const v = out[names[k]][i]; if (v > bv) { bv = v; b = k; } } lab[o] = b; }
     else lab[o] = out.seg[i] > 0.5 ? 1 : 0;
   }
   return lab;
 }
-export function paletteFor(kind) {
-  if (MULTI[kind]) return [[0, 0, 0], ...MULTI[kind].map((n) => MULTI_COLORS[n])];
+export function paletteFor(kind, out = null) {
+  if (MULTI[kind]) return [[0, 0, 0], ...(out ? multiNames(kind, out) : MULTI[kind]).map((n) => MULTI_COLORS[n])];
   if (CLASSES[kind]) return CLASSES[kind].map((n, k) => (k === 0 ? [0, 0, 0] : COLORS[n]));
   return [[0, 0, 0], kind === 'vessels' ? [40, 220, 255] : [255, 60, 200]];
 }

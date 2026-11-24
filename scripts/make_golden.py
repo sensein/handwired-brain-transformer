@@ -27,7 +27,7 @@ out["tissue"] = dict(dims=list(T.shape), spacing=list(sp2), logI=T.ravel().tolis
 # hand-written (Fable) weight files: same golden check in every engine
 import os
 from hwseg.program import Program
-for nm in ("fable_blobs", "fable_vessels", "fable_exposure"):
+for nm in ("fable_blobs", "fable_vessels", "fable_exposure", "fable_blobs_v2", "fable_vessels_v2"):
     f = os.path.join(os.path.dirname(__file__), "..", "weights", "fable", nm + ".json")
     if not os.path.exists(f):
         continue
@@ -49,7 +49,7 @@ out["layers"] = dict(dims=list(Lg.shape), spacing=list(sp3), logI=Lg.ravel().tol
 # hand-written (Fable) weight files: same golden check in every engine
 import os
 from hwseg.program import Program
-for nm in ("fable_blobs", "fable_vessels", "fable_exposure"):
+for nm in ("fable_blobs", "fable_vessels", "fable_exposure", "fable_blobs_v2", "fable_vessels_v2"):
     f = os.path.join(os.path.dirname(__file__), "..", "weights", "fable", nm + ".json")
     if not os.path.exists(f):
         continue

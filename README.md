@@ -49,7 +49,7 @@ fetched 597×64 voxels at level 5 in one pass.
 | `exposure` | always | FOV mean and mean +/- deviations via global heads → recommended display window `[lo, hi]` and mean; viewer derives gamma. Coefficients are two scalars fitted in closed form against the 2nd–99.7th percentile window on real crops. | 15 |
 | `tissue` | ≥ 8.5 | smoothed display image vs. FOV mean, thresholds relative to the FOV's own spread (global head) plus an absolute darkness floor → bg / gray / white | 53 |
 | `layers` (**experimental**, never auto-selected) | explicit choice only, run at L5 | density indicators → pia and white-matter proximity (Gaussian attention at 150/400/900 µm) → signed depth → ReLU bands I–VI at depths declared in µm | ~320 |
-| `cells` | < 8.5 (YO/NN/other) | DoG on the display image; `seg = step(dog - kappa*mean|dog| - tau0)`, kappa 2, tau0 0.03 | ~50 |
+| `fable_blobs_v2` (default) / `cells` (builder) | < 8.5 (YO/NN/other) | hand-written v2 at levels 0-1 / builder DoG on the display image; `seg = step(dog - kappa*mean|dog| - tau0)`, kappa 2, tau0 0.03 | ~50 |
 | `vessels_13dir`, `vessels_26dir` | < 8.5 (LEC/CD31) | max over oriented elongated Gaussians minus wide background; kappa 1, tau0 0.12 | ~330 / ~650 |
 
 **Scale families.** Gaussian attention is analytic in physical lengths, so every program exists at scales x1, x2, x4, x8
@@ -118,13 +118,33 @@ axis, not a trained outcome: for vessels, direction count trades accuracy for si
 
 ## Hand-written weights (`weights/fable/`)
 
-A subagent wrote three weight files by hand (no optimizer): `fable_blobs.json` (multi-scale nucleus / soma / cluster),
-`fable_vessels.json` (capillary / vessel / large, 72 heads, d = 95) and `fable_exposure.json`. They are numerically
-identical in the Python, JavaScript and WebGPU engines (<= 2.4e-5, class outputs exact) and are selectable in the viewer
-as experimental. Its own evaluation: blobs robust to contrast reduction and brightness shifts but conservative (about a
-third of visible nuclei marked at the default view); vessels weak on real LEC (phantom F1 0.41 at default exposure,
-20% of positives on round cells). Both are heavy (windows up to 240–285 µm): at level 0 the viewer must coarsen the
-level to fit device buffers, where blobs give almost nothing. See `weights/fable/NOTES.md`.
+Subagents wrote these weight files by hand (no optimizer, no builder imports, every number chosen and then adjusted by
+looking at images): `fable_blobs_v2.json` and `fable_vessels_v2.json` (round 2, the **defaults for zoomed-in views**, levels
+0-1), the heavier round-1 `fable_blobs.json` / `fable_vessels.json` (octave scales up to 80 um, selectable as experimental)
+and `fable_exposure.json`. Generators, the iteration log and montages are in `weights/fable/` (`NOTES.md`, `figs/`).
+All are numerically identical in the Python, JavaScript and WebGPU engines (<= 1.4e-4 on soft channels, hard outputs exact).
+
+| file | d | layers | nonzero params | what it does |
+|---|---|---|---|---|
+| `fable_blobs_v2` | 25 | 6 | 180 | nuclei / somata (`seg`, `nucleus`, `soma`), sigmas 3 / 6 / 12 um, noise-relative threshold |
+| `fable_vessels_v2` | 37 | 8 | 565 | in-plane oriented tubes (`seg`, `capillary`, `vessel`), 6 directions x 2 scales |
+
+Buffer cost of a 500 x 300-voxel field of view at level 0: blobs v2 72 MB, vessels v2 64 MB (device limit assumed 128 MB), so
+one forward pass fits (round 1 did not and forced the viewer to coarsen the level to 3, where it detected nothing).
+
+Compared on the same real stitched windows (I looked at the montages): on YO the builder cells program marks 1-4% of the
+area (clean but conservative; it misses many nuclei in dense windows), blobs v2 marks 5-15% and covers nearly every bright
+nucleus in YO_117, but merges neighbours and marks diffuse texture and a crack rim in YO_90; on NN, v2 covers somata more fully
+(including a large soma the builder program reduces to a dot) and both stay empty on a noise-only window. On LEC the builder
+vessels program marks almost nothing (0-1.5%; its floors were calibrated on phantoms), while vessels v2 traces the long and
+the ring vessel and finds the small vessels in dim windows. Agent-reported phantom F1 at default exposure: blobs v2 0.94
+(v1 0.76), vessels v2 0.49 (precision 0.50, recall 0.48; v1 0.41).
+
+Known limitations (from the agent's report and my checks): vessels v2 does not reject real NeuN somata (marks 4-10% of NN
+windows), so it is routed to LEC only; round bright vessel cross-sections in LEC are marked; vessels are in-plane only
+(vessels crossing the depth slab are missed) and `capillary` is weak; at level 2 and coarser both programs return nothing
+by design; contrast >= 2 and gamma still change the masks (IoU 0.2-0.7); blobs v2 can mark a crack rim; no real-data accuracy
+numbers exist (no labels). `demo/test/fable_viewer.mjs` runs a hand-written model in the viewer.
 
 ## Streaming, no bulk download
 

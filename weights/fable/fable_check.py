@@ -162,6 +162,20 @@ elif a.mode == "phantomfig":
         for x in ax[:, i]: x.axis("off")
     fig.tight_layout(); fig.savefig(a.out if a.out.endswith(".png") else "phantom.png", dpi=55); print("wrote", a.out)
 
+elif a.mode == "cost":
+    # same rule as demo/engine.js haloFor + demo/app.js: zslab * H * W <= 0.6 * (128 MB / 4 / d)
+    print(f"{a.weights}: d={prog.d}")
+    for lv in (0, 1, 2):
+        sp = np.array([2.564, 3.625, 2.564]) * 2 ** lv; h = np.zeros(3, int)
+        for L in prog.layers:
+            m_ = np.zeros(3, int)
+            for hd in L.heads:
+                if hd.radius_um is not None: m_ = np.maximum(m_, np.maximum(1, np.ceil(hd.radius_um / sp)).astype(int))
+            h += m_
+        zs = 2 * h[0] + 1; tok = zs * 300 * 500; tokh = zs * (300 + 2 * h[1]) * (500 + 2 * h[2]); bud = int(0.6 * 128 * 2**20 / 4 / prog.d)
+        print(f"  level {lv}: halo (z,y,x) = {tuple(h)} voxels, slab {zs} planes; 500x300 FOV: {tok} tokens x d x 4 B = {tok * prog.d * 4 / 2**20:.0f} MB"
+              f" (with in-plane halo {tokh * prog.d * 4 / 2**20:.0f} MB); viewer budget {bud} tokens -> {'fits' if tok <= bud else 'DOES NOT FIT'}")
+
 elif a.mode == "dark":
     cs = (0.1, 0.25, 0.5, 1, 2, 4); bs = (-0.5, -0.3, -0.15, 0, 0.15, 0.3, 0.5)
     for m in [m for m in sel if m["level"] == levels[0]]:
