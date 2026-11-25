@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from .hier import (G_LSP, G_ONE, S0_LOGI, S0_ONE, S_ONE, HierProgram, attn_matrix, conv_matrix, rank_keys, sigma_um_of,
-                   stage_shapes)
+                   fac, stage_shapes)
 
 
 def _apply_axes(v, Ms):
@@ -35,7 +35,7 @@ class HierTransformer:
         self._mcache = {}
         logI = torch.as_tensor(np.asarray(logI), dtype=dt)
         n0, sp0 = tuple(logI.shape), [float(s) for s in spacing]
-        shapes = stage_shapes(n0, p.n_stages)
+        shapes = stage_shapes(n0, p.n_stages, p.zpool)
         x = [torch.zeros((p.d[s],) + shapes[s], dtype=dt) for s in range(p.n_stages)]
         x[0][S0_LOGI] = logI
         x[0][S0_ONE] = 1
@@ -51,10 +51,13 @@ class HierTransformer:
                 if dt == torch.float32:
                     v = v.float()
                 m = rank_keys(v.numel(), op["kmax"])
-                keys = torch.sort(v[::m]).values
+                keys = v[::m]
+                if op.get("kmask") is not None:          # keys restricted to tokens with mask > 0.5 (e.g. tissue only)
+                    keys = keys[x[op["s"]][op["kmask"]].reshape(-1)[::m] > 0.5]
+                keys = torch.sort(keys).values
                 lt = torch.searchsorted(keys, v, right=False)
                 le = torch.searchsorted(keys, v, right=True)
-                u = (lt.to(dt) + 0.5 * (le - lt).to(dt)) / keys.numel()
+                u = (lt.to(dt) + 0.5 * (le - lt).to(dt)) / max(keys.numel(), 1)
                 x[op["s"]][op["dst"]] += u.reshape(shapes[op["s"]])
             elif k == "gpool":
                 xs = x[op["s"]]
@@ -77,16 +80,16 @@ class HierTransformer:
                     x[s] = x[s] + torch.einsum("ch,hzyx->czyx", W2, torch.relu(pre))
             elif k == "attn":
                 a, b = op["src_s"], op["dst_s"]
-                sg = sigma_um_of(op, a, sp0)
+                sg = sigma_um_of(op, a, sp0, p.zpool)
                 key = ("a", a, b, tuple(sg))
                 if key not in self._mcache:
-                    self._mcache[key] = [attn_matrix(n0[ax], sp0[ax], a, b, shapes[a][ax], shapes[b][ax], sg[ax]) for ax in range(3)]
+                    self._mcache[key] = [attn_matrix(n0[ax], sp0[ax], fac(a, ax, p.zpool), fac(b, ax, p.zpool), shapes[a][ax], shapes[b][ax], sg[ax]) for ax in range(3)]
                 o = _apply_axes(x[a][op["src"]], self._mcache[key])
                 for i, (dc, gn) in enumerate(zip(op["dst"], op["gain"])):
                     x[b][dc] += gn * o[i]
             elif k == "conv":
                 s = op["s"]
-                hs = [sp0[ax] * 2 ** s for ax in range(3)]
+                hs = [sp0[ax] * fac(s, ax, p.zpool) for ax in range(3)]
                 for kk in op["kern"]:
                     sg = kk["sigma"] * (hs[2] if op.get("unit", "um") == "vox" else 1.0)
                     key = ("c", s, sg, tuple(kk["order"]))

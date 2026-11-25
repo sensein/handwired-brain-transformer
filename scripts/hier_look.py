@@ -11,14 +11,14 @@ from hwseg.hier import HierProgram
 from hwseg.hier_model import HierTransformer
 
 G = os.environ.get("G", "/orcd/scratch/bcs/002/satra/hwseg-tmp")
-BANKS = {"s": f"{G}/fable/slabbank", "b": f"{G}/fable/bank"}
+BANKS = {"s": f"{G}/fable/slabbank", "b": f"{G}/fable/bank", "h": f"{G}/hier/hbank"}
 _cache = {}
 
 
 def load(key):
     b = "s"
-    if key.startswith("b:"):
-        b, key = "b", key[2:]
+    if key[:2] in ("b:", "h:"):
+        b, key = key[0], key[2:]
     parts = key.split(":")
     if b not in _cache:
         _cache[b] = (np.load(BANKS[b] + ".npz"), {m["key"]: m for m in json.load(open(BANKS[b] + ".json"))})
@@ -33,7 +33,8 @@ def load(key):
 def program(name):
     if name.endswith(".json"):
         return HierProgram.from_json(open(name).read())
-    return getattr(HP, name)()
+    from hwseg import hier_regions as HR
+    return getattr(HP, name, None)() if hasattr(HP, name) else getattr(HR, name)()
 
 
 PAL = {"blobs": {"nucleus": (1, .24, .78), "soma": (1, .67, .16), "cluster": (.47, .78, 1)},

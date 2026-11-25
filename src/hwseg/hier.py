@@ -35,25 +35,30 @@ G_LSP, G_ONE = 0, 1
 
 
 # ------------------------------------------------------------------------------------------------ geometry
-def stage_shapes(n0, n_stages):
+def fac(s, a, zpool=True):
+    """stride of stage s relative to stage 0 along axis a (z = axis 0 keeps stride 1 when the program has zpool=False)."""
+    return 1 if (a == 0 and not zpool) else 2 ** s
+
+
+def stage_shapes(n0, n_stages, zpool=True):
     sh = [tuple(int(v) for v in n0)]
-    for _ in range(1, n_stages):
-        sh.append(tuple((v + 1) // 2 for v in sh[-1]))
+    for s in range(1, n_stages):
+        sh.append(tuple((v + 1) // 2 if (a > 0 or zpool) else v for a, v in enumerate(sh[-1])))
     return sh
 
 
-def stage_pos(n0_a, sp0_a, s, n_s_a):
-    """physical centre (um, tile-centred) of each token of stage s along one axis."""
+def stage_pos(n0_a, sp0_a, f, n_s_a):
+    """physical centre (um, tile-centred) of each token of a stage with stride f (= 2^s) along one axis."""
     k = np.arange(n_s_a, dtype=np.float64)
-    return (k * 2 ** s + (2 ** s - 1) / 2 - (n0_a - 1) / 2) * sp0_a
+    return (k * f + (f - 1) / 2 - (n0_a - 1) / 2) * sp0_a
 
 
-def attn_matrix(n0_a, sp0_a, src_s, dst_s, n_src, n_dst, sigma_um):
+def attn_matrix(n0_a, sp0_a, src_f, dst_f, n_src, n_dst, sigma_um):
     """Row-normalised 1-D Gaussian attention weights (n_dst x n_src) along one axis. The 3-D op is the product of the
     three axis matrices: for a diagonal precision and a box window the softmax normaliser factorises exactly."""
-    ps = stage_pos(n0_a, sp0_a, src_s, n_src)
-    pd = stage_pos(n0_a, sp0_a, dst_s, n_dst)
-    h = sp0_a * 2 ** src_s
+    ps = stage_pos(n0_a, sp0_a, src_f, n_src)
+    pd = stage_pos(n0_a, sp0_a, dst_f, n_dst)
+    h = sp0_a * src_f
     sig = max(float(sigma_um), 1e-6)
     D = pd[:, None] - ps[None, :]
     win = np.abs(D) <= max(3.0 * sig, h) + 1e-9
@@ -99,11 +104,11 @@ def conv_matrix(n, h, sigma_um, order):
     return M
 
 
-def sigma_um_of(op, s_ref, sp0):
+def sigma_um_of(op, s_ref, sp0, zpool=True):
     """per-axis sigma in um: unit 'um' (isotropic or per axis) or 'vox' (voxels of stage s_ref, per axis)."""
     sg = np.broadcast_to(np.asarray(op["sigma"], float), (3,))
     if op.get("unit", "um") == "vox":
-        return [float(sg[a] * sp0[a] * 2 ** s_ref) for a in range(3)]
+        return [float(sg[a] * sp0[a] * fac(s_ref, a, zpool)) for a in range(3)]
     return [float(v) for v in sg]
 
 
@@ -122,6 +127,7 @@ class HierProgram:
     ops: list          # list of dicts (numpy arrays for mlp weights)
     out: dict          # name -> [stage, channel]
     meta: dict = field(default_factory=dict)
+    zpool: bool = True  # False: stages merge patches in-plane only (z keeps the input planes; thin slabs)
 
     def n_params(self):
         tot = nz = 0
@@ -156,7 +162,7 @@ class HierProgram:
                     o[k] = v
             ops.append(o)
         return json.dumps({"format": "hier1", "name": self.name, "n_stages": self.n_stages, "d": list(self.d), "dg": self.dg,
-                           "out": self.out, "meta": self.meta, "ops": ops}, separators=(",", ":"))
+                           "out": self.out, "meta": self.meta, "zpool": self.zpool, "ops": ops}, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, text) -> "HierProgram":
@@ -175,7 +181,7 @@ class HierProgram:
                 if k in op:
                     op[k] = dense(op[k])
             ops.append(op)
-        return cls(js["name"], js["n_stages"], js["d"], js["dg"], ops, js["out"], js.get("meta", {}))
+        return cls(js["name"], js["n_stages"], js["d"], js["dg"], ops, js["out"], js.get("meta", {}), js.get("zpool", True))
 
 
 def is_hier(js_text_or_dict) -> bool:
@@ -187,8 +193,8 @@ def is_hier(js_text_or_dict) -> bool:
 class HB:
     """Channel allocator + op recorder. Channels are (stage, index); 'g' is the global token."""
 
-    def __init__(self, name, n_stages):
-        self.name, self.S = name, n_stages
+    def __init__(self, name, n_stages, zpool=True):
+        self.name, self.S, self.zpool = name, n_stages, zpool
         self.d = [2] + [1] * (n_stages - 1)
         self.dg = 2
         self.ops, self.out, self.meta = [], {}, {}
@@ -219,8 +225,9 @@ class HB:
         self._free[s] += list(chans)
 
     # ---- ops
-    def rank(self, s, src, dst, kmax=4096):
-        self.ops.append(dict(op="rank", s=s, src=src, dst=dst, kmax=int(kmax)))
+    def rank(self, s, src, dst, kmax=4096, kmask=None):
+        """kmask: optional channel; only strided keys with kmask > 0.5 count (rank within a region, e.g. tissue)."""
+        self.ops.append(dict(op="rank", s=s, src=src, dst=dst, kmax=int(kmax), kmask=kmask))
 
     def gpool(self, s, src, dst, score=None, beta=0.0, gain=None):
         src, dst = list(np.atleast_1d(src)), list(np.atleast_1d(dst))
@@ -266,7 +273,7 @@ class HB:
                 for k, v in o.items():
                     W2[k, i] += v
             ops.append(dict(op="mlp", s=-1 if s == "g" else s, W1=W1, b1=b1, W2=W2))
-        return HierProgram(self.name, self.S, list(self.d), self.dg, ops, dict(self.out), dict(self.meta))
+        return HierProgram(self.name, self.S, list(self.d), self.dg, ops, dict(self.out), dict(self.meta), self.zpool)
 
 
 def halo_vox(prog: HierProgram, sp0):
@@ -275,8 +282,8 @@ def halo_vox(prog: HierProgram, sp0):
     tot = np.zeros(3)
     for op in prog.ops:
         if op["op"] == "attn":
-            sg = sigma_um_of(op, op["src_s"], sp0)
-            hsrc = [sp0[a] * 2 ** op["src_s"] for a in range(3)]
+            sg = sigma_um_of(op, op["src_s"], sp0, prog.zpool)
+            hsrc = [sp0[a] * fac(op["src_s"], a, prog.zpool) for a in range(3)]
             tot += [max(3 * sg[a], hsrc[a]) / sp0[a] for a in range(3)]
         elif op["op"] == "conv":
             s = op["s"]
@@ -285,5 +292,5 @@ def halo_vox(prog: HierProgram, sp0):
                 h = sp0[2] * 2 ** s
                 sg = k["sigma"] * (h if op.get("unit", "um") == "vox" else 1.0)
                 r = max(r, max(1, math.ceil(3 * max(sg, 0.5 * h) / h)) * 2 ** s)
-            tot += r
+            tot += [r if prog.zpool else r / 2 ** s, r, r]
     return [int(math.ceil(v)) for v in tot]
