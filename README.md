@@ -243,6 +243,45 @@ Browser tests (Playwright, headless Chromium; set `DEMO_ROOT`/`SHOT_DIR` if need
 `node demo/test/gputest.mjs` compares the WebGPU engine to the Python golden outputs; `node demo/test/viewer_test.mjs`
 drives the live viewer through zoom levels and screenshots each.
 
+## Reference models from the Neurodesk web apps (`demo/nd/`)
+
+Next to the hand-written programs, the model menu offers trained / classical **reference models** taken from
+[neurodesk/webapps](https://github.com/neurodesk/webapps), so our programs can be compared with established tools on the
+same view. They run in the same hook, on tiles of the field of view, and write through the same segmentation path (new
+`P.kind` values `nd_cellpose`, `nd_stardist`, `nd_cellfinder`, `nd_vesselboost`; a shared link regenerates them).
+
+| model | what | input / scale | post-processing | weights (fetched at run time) | licence |
+|---|---|---|---|---|---|
+| `nd_cellpose` | Cellpose 3 `nuclei` (2-D U-Net, flows) | per plane, 1-99th percentile normalization over the FOV's displayed plane, plane resampled so the declared diameter = 17 px (diam_mean), 224-px tiles, 10% overlap | flow dynamics (200 steps), mask clustering, flow-error QC 0.4, hole filling, min 15 px (Neurodesk port of cellpose 3.1.1.1) | 26.5 MB ONNX, Neurodesk HF dataset `neurodeskorg/webapps` @bc1de48 | BSD-3 code + weights; **training data partly CC-BY-NC** (check before commercial use) |
+| `nd_stardist` | StarDist `2D_versatile_fluo` | per plane, 1-99.8th percentile normalization, resampled so the diameter = 16 px, NHWC | star-convex polygons, prob 0.479, polygon NMS 0.3 (clipper-lib 6.4.2 from CDN) | 5.7 MB ONNX, `neurodeskorg/webapps` @2cc5042 | BSD-3 (clipper-lib: Boost) |
+| `nd_cellfinder` | cellfinder 1.10.1 candidate detection (classical, 3-D) | raw intensities (uint16), voxel sizes in um, soma diameter = declared diameter, +8 context planes each side | per-plane LoG + threshold (mean + 3 SD here; cellfinder's 10 SD default finds nothing in dense pan-nuclear YO), 3-D ball filter, structure splitting; candidate *points* drawn as spheres of the declared diameter | none | BSD-3 |
+| `nd_vesselboost` (experimental) | VesselBoost 3-D U-Net (trained on MR angiography) | 64-plane slab, z-score over the tile, 64^3 patches | sigmoid, Gaussian-weighted (sigma 8) patch blending, threshold 0.1, drop components < 10 voxels | 26.3 MB ONNX, `sbollmann/neurodesk-webapps-assets` @a8cdbf8 | code MIT; **weights carry no licence statement** (NOASSERTION): not redistributed |
+
+All weights are downloaded by the browser from Hugging Face (CORS `*`, revision-pinned URLs, size and sha256 checked
+before use) and executed with onnxruntime-web 1.29.0 from jsDelivr (WebGPU execution provider, WebAssembly fallback; WebAssembly on a
+software WebGPU adapter, where the WebGPU provider was measured more than 25x slower: StarDist on 8 tiles did not finish in
+14 min vs 30 s; 3-D convolutions on WebAssembly, as in the Neurodesk app; `?ndep=wasm|webgpu` forces one). Nothing is vendored except the BSD-3 JavaScript pre/post-processing
+ports (`cellpose-core.js`, `stardist-core.js`, `cellfinder-detect.js`, with their licence and notice files). The reference
+models therefore also run without WebGPU.
+
+**Scale.** The networks expect objects of a fixed size in pixels, so the hook runs them at the coarsest pyramid level where
+the declared object spans at least 4 voxels (level 0 for 10-16 um nuclei: DANDI 000108 voxels are 2.56 x 3.63 um in x / y,
+anisotropic in plane) and resamples each plane to square pixels at the network's size. The diameter is a sidebar setting
+(default YO 10 um, NN 16 um: YO nuclei measured about 10 um by a LoG scale search on real windows; NeuN somata are larger);
+it is stored in the layer's parameters. The planes' instances are linked across z with the same rule as our programs
+(`demo/instances.js`), and tiles keep their cores (160-192 px), up to 36 tiles centre first. Cost: per 208 x 208 x 9 window on
+4 WASM threads (headless, SwiftShader node) Cellpose took minutes, StarDist and VesselBoost seconds to tens of seconds; on a
+real GPU with the WebGPU provider it should be much faster (not measured). Label-free comparison with our programs:
+[`docs/neurodesk/COMPARE.md`](docs/neurodesk/COMPARE.md) (`demo/test/nd_compare.mjs` + `scripts/nd_compare.py`);
+`demo/test/nd_bridge_test.mjs` runs a reference model inside Neuroglancer and checks labels across the field of view and
+their regeneration from the link (SwiftShader node, 1 mm x 0.3 mm view at 1.3 um/px, 8 tiles: StarDist 964 objects in 28 s,
+Cellpose 306 in 203 s, cellfinder over 5 planes 196 in 4 s; labels in 16/16, 16/16 and 13/16 grid blocks, identical after
+regeneration).
+
+Not integrated: micro-SAM / MobileSAM (the Neurodesk port is prompt-driven; automatic instance segmentation, AMG/AIS, is
+not part of it, and a 1024 x 1024 encoder pass per tile is heavy), the 3-D StarDist `3D_demo` model (labelled a demo
+model upstream; 2-D per plane plus linking keeps one code path), Big-FISH spot detection (diffraction-limited spots, not nuclei), and the MRI models (SynthSeg, MindGrab, Brainchop).
+
 ## Development
 
 ```bash
