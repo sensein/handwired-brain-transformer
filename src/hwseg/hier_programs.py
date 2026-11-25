@@ -230,7 +230,7 @@ def cells(S=4, kappa=0.0, tau0=0.0005, kappa_s=(0.4, 0.4), floor_s=(0.03, 0.012)
     classes = {"nucleus": (1.6, 3.6), "soma": (3.6, 8.0), "cluster": (8.0, 18.0)}   # sigma_eff in um (blob radius ~ 1.7 sigma)
     C, Cm, seg = _scale_detector(B, fe, "blob", scales, classes, DIRS13, kappa, tau0, kappa_s=kappa_s, floor_s=floor_s)
     B.out = {"seg": [0, seg], "score": [0, Cm], "u": [0, fe["u"]], **{k: [0, c] for k, c in C.items()}, "ok": [-1, fe["ok"]]}
-    B.meta = dict(kind="blobs", hier=True, input="logI", classes=list(classes), sigma_classes_um=classes)
+    B.meta = dict(kind="blobs", hier=True, input="logI", classes=list(classes), sigma_classes_um=classes, zhalo_um=40.0)
     return B.build()
 
 
@@ -243,5 +243,5 @@ def vessels(S=4, kappa=0.0, tau0=0.0005, kappa_s=(0.55, 0.5), floor_s=(0.045, 0.
     classes = {"capillary": (1.2, 3.0), "vessel": (3.0, 7.0), "large": (7.0, 20.0)}
     C, Cm, seg = _scale_detector(B, fe, "tube", scales, classes, DIRS13, kappa, tau0, kappa_s=kappa_s, floor_s=floor_s, tube_ab=tube_ab)
     B.out = {"seg": [0, seg], "score": [0, Cm], "u": [0, fe["u"]], **{k: [0, c] for k, c in C.items()}, "ok": [-1, fe["ok"]]}
-    B.meta = dict(kind="vessels_ms", hier=True, input="logI", classes=list(classes), sigma_classes_um=classes)
+    B.meta = dict(kind="vessels_ms", hier=True, input="logI", classes=list(classes), sigma_classes_um=classes, zhalo_um=40.0)
     return B.build()

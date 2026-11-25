@@ -234,6 +234,6 @@ def regions(S=5, sigma_c=100.0, sigma_f=200.0, sigma_clean=150.0, margin=0.05, s
              "mO": [-1, mO], "mI": [-1, mI], "mW": [-1, mW], "O": [0, O], "I": [0, I], "W": [0, W], "Pa": [0, Pa], "Pb": [0, Pb]}
     cols = {"bg": [90, 90, 100], "L1": [253, 231, 37], "L2": [170, 220, 50], "L3": [94, 201, 98], "L4": [33, 145, 140], "L5": [59, 82, 139],
             "L6": [110, 40, 150], "WM": [215, 215, 235], "tissue": [90, 200, 120], "cortex": [255, 160, 40], "wm": [60, 140, 255]}
-    B.meta = dict(kind="regions", hier=True, input="logI", classes=["bg", "L1", "L2", "L3", "L4", "L5", "L6", "WM"], colors=cols,
+    B.meta = dict(kind="regions", hier=True, input="logI", classes=["bg", "L1", "L2", "L3", "L4", "L5", "L6", "WM"], colors=cols, zhalo_um=100.0,
                   layer_fractions=list(LAYER_FRACTIONS), potential_edges=[round(e, 4) for e in edges])
     return B.build()

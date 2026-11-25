@@ -2,8 +2,9 @@
 // window.viewer, runs a weight-space-programmed model on exactly that field of view with the WebGPU engine, and writes the
 // detections back as a Neuroglancer annotation layer. Triggered by a button, or automatically (debounced) as you navigate.
 import { parseProgram, GPUEngine, haloFor } from './engine.js';
+import { parseHier, isHier } from './hier.js';
 import { Zarr, Slab, clamp } from './zarr.js';
-import { segRegion, segVolume, labelVolume, adjustLogVol, recommendExposure, IDENT } from './seg.js';
+import { segRegion, segVolume, labelVolume, adjustLogVol, recommendExposure, IDENT, haloOf } from './seg.js';
 import { scaledModel, FAMILIES } from './route.js';
 
 const LAYER = 'hwseg detections';
@@ -73,7 +74,7 @@ const viewer = window.viewer;
 
 // ---- small UI
 const box = el('div', 'position:fixed;left:8px;bottom:8px;z-index:9999;background:rgba(20,21,26,.92);color:#e8e8e4;font:12px/1.4 system-ui;padding:8px 10px;border:1px solid #444;border-radius:8px;max-width:340px');
-box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="regions">tissue outline + cortex / white-matter boundary (contours)</option></select> <select id="hw-nz" title="planes in z the detector runs on (3-D); 1 = displayed plane only"><option value="1">1 plane (2-D)</option><option value="5">5 planes</option><option value="9" selected>9 planes</option><option value="15">15 planes</option><option value="25">25 planes</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
+box.innerHTML = '<b>hwseg</b> programmed model in the loop<br><select id="hw-m"><option value="fable_blobs_v2">cells (nuclei / somata, hand-written v2)</option><option value="fable_vessels_v2">vessels (LEC, hand-written v2)</option><option value="cells">cells (builder)</option><option value="vessels_26dir">vessels (builder)</option><option value="regions">tissue outline + cortex / white-matter boundary (contours)</option><option value="hier_cells">cells (hierarchical, any zoom)</option><option value="hier_vessels">vessels (hierarchical, any zoom, LEC)</option><option value="hier_regions">tissue / depth bands / white matter (hierarchical, any zoom)</option></select> <select id="hw-nz" title="planes in z the detector runs on (3-D); 1 = displayed plane only"><option value="1">1 plane (2-D)</option><option value="5">5 planes</option><option value="9" selected>9 planes</option><option value="15">15 planes</option><option value="25">25 planes</option></select> <button id="hw-run">Detect in this view</button> <label><input type="checkbox" id="hw-auto"> auto</label><div id="hw-s" style="color:#9a9a94;margin-top:4px">idle</div>';
 const EMBEDDED = new URLSearchParams(location.search).has('embedded');    // the shell page drives us through window.__hwNg
 document.body.append(box); if (EMBEDDED) box.style.display = 'none';
 window.__hwNg = { status: '', runs: 0, busy: false, events: [], last: null };
@@ -82,7 +83,7 @@ const say = (t) => { document.getElementById('hw-s').textContent = t; window.__h
 let engine = null; try { engine = await GPUEngine.create(); } catch (e) { say('no WebGPU: detection unavailable'); }
 const HERE = (p) => new URL(p, import.meta.url).href;                     // the page is /ng/index.html; models live next to this module
 const index = await (await fetch(HERE('models/index.json'))).json(), programs = {};
-const getProgram = async (k) => programs[k] ||= parseProgram(await (await fetch(HERE(`models/${index[k].file}`))).text());
+const getProgram = async (k) => programs[k] ||= (async () => { const t = await (await fetch(HERE(`models/${index[k].file}`))).text(); return isHier(t) ? parseHier(t) : parseProgram(t); })();
 const sources = {};
 
 // ---- read the view: field of view recovered from the data coordinates Neuroglancer reports under the panel corners
@@ -187,7 +188,16 @@ function applyHwLayers(specs, rec) {
 async function computeSeg(P) {
   for (let i = 0; i < 1800 && !window.__hwNg.ready; i++) await sleep(100);
   if (!engine) throw new Error('no WebGPU: segmentation unavailable');
-  const src = await openSource(P.src), zarr = src.z, L = zarr.levels[P.level], adjust = (v) => adjustLogVol(v, P.rec.lo, P.rec.hi, { b: 0, c: 1, g: P.rec.gamma });
+  const src = await openSource(P.src), zarr = src.z, L = zarr.levels[P.level], adjust = P.rec ? (v) => adjustLogVol(v, P.rec.lo, P.rec.hi, { b: 0, c: 1, g: P.rec.gamma }) : null;   // hier programs: raw log(I+1), no exposure
+  if (P.kind === 'hregions') {                                                   // hierarchical regions: one pass over the FOV, labels 1-6 = depth bands, 7 = WM, 8 = tissue (no cortex decision)
+    const prog = await getProgram('hier_regions'), [y0, y1, x0, x1] = P.box;
+    say('regions (hierarchical) on WebGPU...'); const r = await segRegion(zarr, engine, prog, P.level, P.zl, y0, y1, x0, x1, null, { halo: false });
+    const w = r.w, h = r.h, lab = new Uint32Array(w * h), names = ['L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (r.oy + y) * r.dims[2] + r.ox + x; let k = 0;
+      for (let n = 0; n < names.length; n++) if (r.out[names[n]][i] > 0.5) { k = n + 1; break; }
+      if (!k && r.out.tissue[i] > 0.5) k = 8; lab[y * w + x] = k; }
+    return { blocks: [{ x0, x1, y0, y1, z0: P.zl, z1: P.zl + 1, lab }], w, h };
+  }
   if (P.kind === 'regions') {
     const progT = await getProgram('fable_tissue'), progC = await getProgram('fable_cortex_wm'), [y0, y1, x0, x1] = P.box;
     say('regions: tissue program on WebGPU...'); const rT = await segRegion(zarr, engine, progT, P.level, P.zl, y0, y1, x0, x1, adjust, { halo: false });
@@ -197,8 +207,8 @@ async function computeSeg(P) {
     return { blocks: [{ x0, x1, y0, y1, z0: P.zl, z1: P.zl + 1, lab }], tis, wm, w, h };
   }
   const isVessel = P.kind === 'vessels', prog = await getProgram(P.model), box_ = P.box, { zA, zB, zA2, zB2 } = P, nz = zB - zA, hal = 32;
-  const [hz] = haloFor(prog, L.sp), Zin = Math.min(L.shape[0], (zB2 - zA2) + 2 * hz);
-  const side = Math.max(96 + 2 * hal, Math.min(512, Math.floor(Math.sqrt(engine.maxTokens(prog.d) * 0.8 / Zin)))), core = side - 2 * hal;   // tile side that keeps (slab + z halo) tokens within the device buffer
+  const [hz] = haloOf(prog, L.sp), Zin = Math.min(L.shape[0], (zB2 - zA2) + 2 * hz);
+  const side = Math.max(96 + 2 * hal, Math.min(512, Math.floor(Math.sqrt(engine.maxTokens(prog.hier ? prog.d[0] + 2 : prog.d) * 0.8 / Zin)))), core = side - 2 * hal;   // tile side that keeps (slab + z halo) tokens within the device buffer
   const cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;
   const tiles = []; for (let ty = box_[0]; ty < box_[1]; ty += core) for (let tx = box_[2]; tx < box_[3]; tx += core) tiles.push([ty, Math.min(ty + core, box_[1]), tx, Math.min(tx + core, box_[3])]);
   tiles.sort((p, q) => Math.hypot((p[0] + p[1]) / 2 - cy, (p[2] + p[3]) / 2 - cx) - Math.hypot((q[0] + q[1]) / 2 - cy, (q[2] + q[3]) / 2 - cx));   // centre first
@@ -250,6 +260,28 @@ async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   window.__hwNg.last = { regions: true, outline: layers[0][2].length, boundary: layers[1][2].length, tissuePct: tp, wmPct: wp, level, fov: [w, h] };
 }
 
+// hierarchical regions: whole FOV in one pass at the coarsest level that fits the device buffer (no exposure, no level routing of the program)
+async function detectRegionsHier(j, fov, zarr, off, d, umPerPx) {
+  const prog = await getProgram('hier_regions'), A = axisIdx(d), m0 = scaledModel('hier_regions', umPerPx, zarr);
+  const gx = padRange([fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b)), gy = padRange([fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b)), lz = fov.c[A.z] - off[0];
+  let level = m0.level, box_;
+  for (;;) {
+    const f = 2 ** level, L = zarr.levels[level], hz = haloOf(prog, L.sp)[0];
+    box_ = [clamp(Math.floor((gy[0] - off[1]) / f), 0, L.shape[1] - 1), clamp(Math.ceil((gy[1] - off[1]) / f), 1, L.shape[1]), clamp(Math.floor((gx[0] - off[2]) / f), 0, L.shape[2] - 1), clamp(Math.ceil((gx[1] - off[2]) / f), 1, L.shape[2])];
+    if ((2 * hz + 1) * (box_[1] - box_[0]) * (box_[3] - box_[2]) <= Math.floor(engine.maxTokens(Math.max(...prog.d)) * 0.5) || level >= zarr.top) break; level++;
+  }
+  const f = 2 ** level, L = zarr.levels[level], zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
+  const P = { kind: 'hregions', level, zl, box: box_, src: imageSource(j) };
+  const R = await computeSeg(P);
+  const COL = { 1: '#fde725', 2: '#aadc32', 3: '#5ec962', 4: '#21918c', 5: '#3b528b', 6: '#6e2896', 7: '#d7d7eb', 8: '#5ac878' };
+  const specs = [segLayer('hwseg regions (hierarchical): depth bands / white matter', putSeg(P, R.blocks), { segmentColors: COL })];
+  lastView = viewKey();
+  if (!applyHwLayers(specs, null)) { const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name)).concat(specs); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k); }
+  const lab = R.blocks[0].lab, n = lab.length, cnt = new Array(9).fill(0); for (let i = 0; i < n; i++) cnt[lab[i]]++;
+  say(`hierarchical regions at level ${level} (${umPerPx.toFixed(0)} um/px): tissue ${(100 * (n - cnt[0]) / n).toFixed(0)}%, white matter ${(100 * cnt[7] / n).toFixed(0)}%, bands I-VI ${(100 * cnt.slice(1, 7).reduce((a, b) => a + b, 0) / n).toFixed(0)}%`);
+  window.__hwNg.last = { hregions: true, level, fov: [box_[3] - box_[2], box_[1] - box_[0]], counts: cnt };
+}
+
 async function detect() {
   if (!engine) return; window.__hwNg.runs++;
   const j = viewer.state.toJSON(), disp = j.displayDimensions, fov = await probeFov();
@@ -261,7 +293,8 @@ async function detect() {
   const lx = [gx[0] - off[2], gx[1] - off[2]], ly = [gy[0] - off[1], gy[1] - off[1]], lz = gz - off[0];
   const umPerPx = ((gx[1] - gx[0]) * L0.sp[2]) / fov.w;                       // physical size of a screen pixel
   if ($('hw-m').value === 'regions') return detectRegions(j, fov, zarr, off, d, umPerPx, sp0);
-  if (umPerPx > 16) { say(`zoom in first: cells and vessels need a field of view of a few mm (this view is ${umPerPx.toFixed(0)} um/px)`); return; }
+  if ($('hw-m').value === 'hier_regions') return detectRegionsHier(j, fov, zarr, off, d, umPerPx);
+  if (umPerPx > 16 && !FAMILIES[$('hw-m').value].hier) { say(`zoom in first: cells and vessels need a field of view of a few mm (this view is ${umPerPx.toFixed(0)} um/px)`); return; }
   const family = $('hw-m').value, m = scaledModel(family, umPerPx, zarr), prog = await getProgram(m.model), f = 2 ** m.level, L = zarr.levels[m.level];
   const box_ = [clamp(Math.floor(ly[0] / f), 0, L.shape[1] - 1), clamp(Math.ceil(ly[1] / f), 1, L.shape[1]), clamp(Math.floor(lx[0] / f), 0, L.shape[2] - 1), clamp(Math.ceil(lx[1] / f), 1, L.shape[2])];
   const nzWant = Math.max(1, +$('hw-nz').value || 1), zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
@@ -269,9 +302,10 @@ async function detect() {
   const mz = nz > 1 ? Math.min(4, Math.ceil(10 / L.sp[0])) : 0, zA2 = Math.max(0, zA - mz), zB2 = Math.min(L.shape[0], zB + mz);   // margin planes so objects cut by the slab edge keep their full z extent; a detection belongs to the slab if its centre is inside [zA,zB)
   const cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;
   const cy0 = Math.max(0, cy - 192), cy1 = Math.min(L.shape[1], cy + 192), cx0 = Math.max(0, cx - 192), cx1 = Math.min(L.shape[2], cx + 192);
-  say(`${m.model}: streaming exposure window...`);
-  const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, box_[0], box_[1], box_[2], box_[3]), isVessel = /^vessels/.test(FAMILIES[family].kind);
-  const P = { kind: isVessel ? 'vessels' : 'cells', family, model: m.model, level: m.level, box: box_, zA, zB, zA2, zB2, rec: { lo: +rec.lo.toFixed(4), hi: +rec.hi.toFixed(4), gamma: +rec.gamma.toFixed(4) }, src: imageSource(j) };
+  const hier = !!FAMILIES[family].hier, isVessel = /^vessels/.test(FAMILIES[family].kind);
+  if (!hier) say(`${m.model}: streaming exposure window...`);
+  const rec = hier ? null : await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, box_[0], box_[1], box_[2], box_[3]);   // hier programs normalise contrast in-model
+  const P = { kind: isVessel ? 'vessels' : 'cells', family, model: m.model, level: m.level, box: box_, zA, zB, zA2, zB2, ...(rec ? { rec: { lo: +rec.lo.toFixed(4), hi: +rec.hi.toFixed(4), gamma: +rec.gamma.toFixed(4) } } : {}), src: imageSource(j) };
   const { blocks, comps, nTiles, nUsed } = await computeSeg(P), use = { length: nUsed }, tiles = { length: nTiles };
   if (tiles.length > use.length) say(`field of view needs ${tiles.length} tiles; the ${use.length} nearest the centre were run - zoom in for full coverage`);
   const sL = L.sp;
@@ -291,7 +325,7 @@ async function detect() {
     const img = k.layers.find((l) => l.type === 'image'); if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
     k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy'; viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
   }
-  say(`segmentation: ${isVessel ? 'vessel mask' : ann.length + ' cells'} over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
+  say(`segmentation: ${isVessel ? 'vessel mask' : ann.length + ' cells'} over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px${rec ? `, exposure gamma ${rec.gamma.toFixed(2)}` : ', in-model contrast normalisation'})`);
   const boxG = [[box_[2] * f + off[2], box_[3] * f + off[2]], [box_[0] * f + off[1], box_[1] * f + off[1]]];
   window.__hwNg.last = { fovG: [gx0_, gy0_], boxG, covers: boxG[0][0] <= gx0_[0] && boxG[0][1] >= gx0_[1] && boxG[1][0] <= gy0_[0] && boxG[1][1] >= gy0_[1], n: ann.length, model: m.model, level: m.level, planes: nz, tiles: use.length, fov: [box_[3] - box_[2], box_[1] - box_[0]], zspan: ann.length ? [Math.min(...comps.map((c) => c.z)), Math.max(...comps.map((c) => c.z))] : null, meanRz: comps.length ? comps.reduce((a_, c) => a_ + c.rz, 0) / comps.length : 0, edgeZ: comps.filter((c) => c.edgeZ).length };
 }

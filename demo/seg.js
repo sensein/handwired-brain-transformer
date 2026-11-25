@@ -1,4 +1,5 @@
 import { runCPU, haloFor } from './engine.js';
+import { haloHier, runHierCPU, HierGPU } from './hier.js';
 import { clamp } from './zarr.js';
 
 export function toCanvas(arr, w, h, f) { const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d'), im = g.createImageData(w, h); f(im.data); g.putImageData(im, 0, 0); return c; }
@@ -20,21 +21,33 @@ export const percentileWindow = (v, p0 = 0.02, p1 = 0.997) => { const s = Float3
 
 // opts.halo=false: the model sees only the requested in-plane region (view-dependent: in-context statistics and
 // attention are computed over the field of view and nothing outside it); depth context (z slab) is still included.
+// hier1 programs (demo/hier.js): input = raw log(I+1) (no display window / exposure), z context limited to meta.zhalo_um.
+export function haloOf(prog, sp) {
+  if (!prog.hier) return haloFor(prog, sp);
+  const h = haloHier(prog, sp); h[0] = Math.min(h[0], Math.ceil((prog.meta.zhalo_um ?? 40) / sp[0])); return h;
+}
+async function runAny(engine, prog, vol, dims, sp, zc, zhi) {
+  const plane = dims[1] * dims[2], names = Object.keys(prog.out).filter((n) => !prog.hier || prog.out[n][0] === 0);
+  if (prog.hier) {
+    if (engine) { const he = engine._hier ||= new HierGPU(engine.device); return he.run(prog, vol, dims, sp, { planes: [zc, zhi + 1], names }); }
+    if (dims[0] * dims[1] * dims[2] > 400000) throw new Error('tile too large for CPU reference');
+    const o = runHierCPU(prog, vol, dims, sp), out = {}; for (const k of names) out[k] = o[k].subarray(zc * plane, (zhi + 1) * plane); return out;
+  }
+  if (engine) return engine.run(prog, vol, dims, sp, zc, { zhi });
+  if (dims[0] * dims[1] * dims[2] > 150000) throw new Error('tile too large for CPU reference');
+  const o = runCPU(prog, vol, dims, sp), out = {}; for (const k in o) out[k] = o[k].subarray(zc * plane, (zhi + 1) * plane); return out;
+}
+
 export async function segRegion(zarr, engine, prog, level, zl, y0, y1, x0, x1, adjustFn = null, opts = {}) {
-  const L = zarr.levels[level], sp = L.sp; let [hz, hy, hx] = haloFor(prog, sp);
+  const L = zarr.levels[level], sp = L.sp; let [hz, hy, hx] = haloOf(prog, sp);
   if (opts.halo === false) { hy = 0; hx = 0; }
   if (opts.onStage) opts.onStage('fetch');
   const zs = Math.max(0, zl - hz), ze = Math.min(L.shape[0], zl + hz + 1), ys = Math.max(0, y0 - hy), ye = Math.min(L.shape[1], y1 + hy), xs = Math.max(0, x0 - hx), xe = Math.min(L.shape[2], x1 + hx);
   let vol = await zarr.crop(level, zs, ze, ys, ye, xs, xe);
-  if (adjustFn) vol = adjustFn(vol);
+  if (adjustFn && !prog.hier) vol = adjustFn(vol);
   const dims = [ze - zs, ye - ys, xe - xs], zc = zl - zs, pl = dims[1] * dims[2];
   if (opts.onStage) opts.onStage('run');
-  let out;
-  if (engine) out = await engine.run(prog, vol, dims, sp, zc);
-  else {
-    if (dims[0] * dims[1] * dims[2] > 150000) throw new Error('tile too large for CPU reference');
-    const o = runCPU(prog, vol, dims, sp); out = {}; for (const k in o) out[k] = o[k].subarray(zc * pl, (zc + 1) * pl);
-  }
+  const out = await runAny(engine, prog, vol, dims, sp, zc, zc);
   return { out, raw: vol.subarray(zc * pl, (zc + 1) * pl), dims, ox: x0 - xs, oy: y0 - ys, w: x1 - x0, h: y1 - y0, level };
 }
 
@@ -42,8 +55,9 @@ export const COLORS = { bg: [90, 90, 100], gray: [255, 160, 40], white: [60, 140
   L1: [253, 231, 37], L2: [170, 220, 50], L3: [94, 201, 98], L4: [33, 145, 140], L5: [59, 82, 139], L6: [110, 40, 150], WM: [215, 215, 235] };
 export const CLASSES = { tissue: ['bg', 'gray', 'white'], layers: ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM'],
   // hand-written hard class maps: all channels zero = the model says nothing (dark / flat / unreadable view), drawn as no overlay
-  tissue2: ['bg', 'tissue'], cortex_wm: ['bg', 'cortex', 'wm'], layers2: ['bg', 'sup', 'mid', 'deep', 'wm'] };
-export const HARD = new Set(['tissue2', 'cortex_wm', 'layers2']);
+  tissue2: ['bg', 'tissue'], cortex_wm: ['bg', 'cortex', 'wm'], layers2: ['bg', 'sup', 'mid', 'deep', 'wm'],
+  regions: ['bg', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'WM', 'tissue'] };   // hier_regions: depth bands I-VI, white matter, tissue without a cortex decision
+export const HARD = new Set(['tissue2', 'cortex_wm', 'layers2', 'regions']);
 // Scale-invariant detectors with size classes: 'seg' gates, the class channels colour by size / type.
 export const MULTI = { blobs: ['nucleus', 'soma', 'cluster'], vessels_ms: ['capillary', 'vessel', 'large'] };
 export const MULTI_COLORS = { nucleus: [255, 60, 200], soma: [255, 170, 40], cluster: [120, 200, 255], capillary: [40, 220, 255], vessel: [80, 255, 120], large: [255, 230, 60] };
@@ -88,15 +102,13 @@ export function regionStats(kind, r, sp) {
 
 // Segment every plane of [z0,z1) over the region (view-dependent: halo=false means in-plane context is the FOV only).
 export async function segVolume(zarr, engine, prog, level, z0, z1, y0, y1, x0, x1, adjustFn = null, opts = {}) {
-  const L = zarr.levels[level], sp = L.sp; let [hz, hy, hx] = haloFor(prog, sp);
+  const L = zarr.levels[level], sp = L.sp; let [hz, hy, hx] = haloOf(prog, sp);
   if (opts.halo === false) { hy = 0; hx = 0; }
   const zs = Math.max(0, z0 - hz), ze = Math.min(L.shape[0], z1 + hz), ys = Math.max(0, y0 - hy), ye = Math.min(L.shape[1], y1 + hy), xs = Math.max(0, x0 - hx), xe = Math.min(L.shape[2], x1 + hx);
   let vol = await zarr.crop(level, zs, ze, ys, ye, xs, xe);
-  if (adjustFn) vol = adjustFn(vol);
+  if (adjustFn && !prog.hier) vol = adjustFn(vol);
   const dims = [ze - zs, ye - ys, xe - xs], plane = dims[1] * dims[2], zc = z0 - zs, zhi = z1 - 1 - zs;
-  let out;
-  if (engine) out = await engine.run(prog, vol, dims, sp, zc, { zhi });
-  else { const o = runCPU(prog, vol, dims, sp); out = {}; for (const k in o) out[k] = o[k].subarray(zc * plane, (zhi + 1) * plane); }
+  const out = await runAny(engine, prog, vol, dims, sp, zc, zhi);
   return { out, dims, ox: x0 - xs, oy: y0 - ys, w: x1 - x0, h: y1 - y0, nz: z1 - z0, plane };
 }
 
