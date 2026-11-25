@@ -270,7 +270,7 @@ async function detect() {
   const cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;
   const cy0 = Math.max(0, cy - 192), cy1 = Math.min(L.shape[1], cy + 192), cx0 = Math.max(0, cx - 192), cx1 = Math.min(L.shape[2], cx + 192);
   say(`${m.model}: streaming exposure window...`);
-  const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, cy0, cy1, cx0, cx1), isVessel = /^vessels/.test(FAMILIES[family].kind);
+  const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, box_[0], box_[1], box_[2], box_[3]), isVessel = /^vessels/.test(FAMILIES[family].kind);
   const P = { kind: isVessel ? 'vessels' : 'cells', family, model: m.model, level: m.level, box: box_, zA, zB, zA2, zB2, rec: { lo: +rec.lo.toFixed(4), hi: +rec.hi.toFixed(4), gamma: +rec.gamma.toFixed(4) }, src: imageSource(j) };
   const { blocks, comps, nTiles, nUsed } = await computeSeg(P), use = { length: nUsed }, tiles = { length: nTiles };
   if (tiles.length > use.length) say(`field of view needs ${tiles.length} tiles; the ${use.length} nearest the centre were run - zoom in for full coverage`);

@@ -120,13 +120,22 @@ export function paletteFor(kind, out = null) {
 // Model-recommended default exposure for a field of view: runs the `exposure` program (global heads over the FOV slab)
 // and returns the display window [lo, hi] (log domain) and a gamma that maps the FOV mean to ~0.4 of the display range.
 export async function recommendExposure(zarr, engine, prog, level, zl, y0, y1, x0, x1) {
-  const L = zarr.levels[level], sp = L.sp, z0 = Math.max(0, zl - 6), z1 = Math.min(L.shape[0], zl + 7);
-  const cap = 384, cy = (y0 + y1) >> 1, cx = (x0 + x1) >> 1, hy = Math.min((y1 - y0) >> 1, cap >> 1), hx = Math.min((x1 - x0) >> 1, cap >> 1);
-  const vy0 = Math.max(0, cy - hy), vy1 = Math.min(L.shape[1], cy + hy + 1), vx0 = Math.max(0, cx - hx), vx1 = Math.min(L.shape[2], cx + hx + 1);
-  const vol = await zarr.crop(level, z0, z1, vy0, vy1, vx0, vx1), dims = [z1 - z0, vy1 - vy0, vx1 - vx0], zc = zl - z0, pl = dims[1] * dims[2];
+  // The exposure program has only global heads (statistics over every token), so its output depends on the multiset of voxel values, not on
+  // layout. It therefore reads a mosaic of 96x96 patches spread uniformly over the whole field of view (not a centre crop): 4x4 patches = 147k tokens.
+  const L = zarr.levels[level], sp = L.sp, P = 96, G = 4, H = y1 - y0, W = x1 - x0;
+  const gy = Math.min(G, Math.max(1, Math.floor(H / P))), gx = Math.min(G, Math.max(1, Math.floor(W / P)));
+  const py = Math.min(P, H), px = Math.min(P, W), jobs = [];
+  for (let i = 0; i < gy; i++) for (let j = 0; j < gx; j++) {
+    const cy = y0 + Math.round(((i + 0.5) / gy) * H), cx = x0 + Math.round(((j + 0.5) / gx) * W);        // patch centres on a uniform grid over the FOV
+    const ys = clamp(cy - (py >> 1), y0, y1 - py), xs = clamp(cx - (px >> 1), x0, x1 - px);
+    jobs.push(zarr.crop(level, zl, zl + 1, ys, ys + py, xs, xs + px).then((v) => ({ v, i, j })));
+  }
+  const parts = await Promise.all(jobs), MH = gy * py, MW = gx * px, vol = new Float32Array(MH * MW);
+  for (const { v, i, j } of parts) for (let y = 0; y < py; y++) vol.set(v.subarray(y * px, (y + 1) * px), (i * py + y) * MW + j * px);
+  const dims = [1, MH, MW];
   let o;
-  if (engine) o = await engine.run(prog, vol, dims, sp, zc);
-  else { const r = runCPU(prog, vol, dims, sp); o = {}; for (const k in r) o[k] = r[k].subarray(zc * pl, (zc + 1) * pl); }
+  if (engine) o = await engine.run(prog, vol, dims, sp, 0);
+  else { const r = runCPU(prog, vol, dims, sp); o = {}; for (const k in r) o[k] = r[k]; }
   const lo = o.lo[0], hi = Math.max(o.hi[0], o.lo[0] + 0.5), mean = o.mean[0], um = clamp((mean - lo) / (hi - lo), 0.05, 0.95);
   return { lo, hi, mean, gamma: clamp(Math.log(0.4) / Math.log(um), 0.4, 2.5) };
 }
