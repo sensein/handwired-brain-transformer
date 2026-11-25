@@ -171,6 +171,18 @@ function setSegAlpha(a) {                                                      /
   for (const ml of viewer.layerManager.managedLayers) { const ds = ml.layer && ml.layer.displayState; if (ds && ds.selectedAlpha) { ds.selectedAlpha.value = segAlpha; n++; } }
   return n;
 }
+// Update only our own layers (and the image window) instead of rewriting the whole viewer state: a full reset + restoreState after every run
+// broke the layout/display state (Neuroglancer: "Cannot read properties of undefined (reading 'generation')") in continuous mode.
+function applyHwLayers(specs, rec) {
+  try {
+    const lm = viewer.layerManager;
+    for (const ml of [...lm.managedLayers]) if (/^hwseg /.test(ml.name)) lm.removeManagedLayer(ml);
+    for (const spec of specs) lm.addManagedLayer(viewer.layerSpecification.getLayer(spec.name, spec));
+    if (rec) { const j = viewer.state.toJSON(), im = (j.layers || []).find((l) => l.type === 'image'); const ml = im && lm.getLayerByName(im.name);
+      if (ml && ml.layer && ml.layer.shaderControlState && /uicontrol float lo/.test(String(im.shader || ''))) ml.layer.shaderControlState.restoreState({ lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) }); }
+    return true;
+  } catch (e) { console.warn('layer API failed, falling back to restoreState:', e); return false; }
+}
 // ---- compute a segmentation from its parameters (also used to regenerate one from a shared link)
 async function computeSeg(P) {
   for (let i = 0; i < 1800 && !window.__hwNg.ready; i++) await sleep(100);
@@ -224,14 +236,15 @@ async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   const toG = (p) => { const g = { z: zl * f + off[0], y: (box_[0] + p[1]) * f + off[1], x: (box_[2] + p[0]) * f + off[2] }; return keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)); };
   const mk = (segs, tag) => segs.map((s2, i) => ({ type: 'line', id: tag + i, pointA: toG(s2[0]), pointB: toG(s2[1]) }));
   const layers = [['hwseg tissue outline', '#ffd23c', mk(contourSegments(tis, w, h), 't')], ['hwseg cortex/white-matter boundary', '#3cd2ff', mk(contourSegments(wm, w, h), 'w')]];
-  const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name));
   const LINE_SHADER = 'void main() { setColor(defaultColor()); setLineWidth(1.5); setEndpointMarkerSize(0.0); setEndpointMarkerBorderWidth(0.0); }';   // thin lines, no endpoint markers
-  for (const [name, col, ann] of layers) k.layers.push({ type: 'annotation', name, annotationColor: col, shader: LINE_SHADER, source: { url: 'local://annotations', transform: { outputDimensions: Object.fromEntries(keys.map((kk) => [kk, d[kk]])) } }, annotations: ann });
-  k.layers.splice(1, 0, segLayer('hwseg tissue / white-matter segmentation', putSeg(P, R.blocks), { segmentColors: { 1: '#ffa028', 2: '#3c8cff' } }));
-  const img = k.layers.find((l) => l.type === 'image');
-  if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
-  k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';
-  lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
+  const specs = [segLayer('hwseg tissue / white-matter segmentation', putSeg(P, R.blocks), { segmentColors: { 1: '#ffa028', 2: '#3c8cff' } })];
+  for (const [name, col, ann] of layers) specs.push({ type: 'annotation', name, annotationColor: col, shader: LINE_SHADER, source: { url: 'local://annotations', transform: { outputDimensions: Object.fromEntries(keys.map((kk) => [kk, d[kk]])) } }, annotations: ann });
+  lastView = viewKey();
+  if (!applyHwLayers(specs, rec)) {
+    const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name)).concat(specs);
+    const img = k.layers.find((l) => l.type === 'image'); if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
+    k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy'; viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
+  }
   const tp = 100 * tis.reduce((a, b) => a + b, 0) / (w * h), wp = 100 * wm.reduce((a, b) => a + b, 0) / (w * h);
   say(`${layers[0][2].length} outline + ${layers[1][2].length} cortex/WM segments (tissue ${tp.toFixed(0)}%, white matter ${wp.toFixed(0)}%, level ${level}, ${umPerPx.toFixed(0)} um/px, FOV ${w}x${h} voxels)`);
   window.__hwNg.last = { regions: true, outline: layers[0][2].length, boundary: layers[1][2].length, tissuePct: tp, wmPct: wp, level, fov: [w, h] };
@@ -269,15 +282,15 @@ async function detect() {
   const ann = comps.map((c, i) => { const g = { z: (c.z + 0.5) * f + off[0], y: (c.y + 0.5) * f + off[1], x: (c.x + 0.5) * f + off[2] };
     const rad = { z: Math.max(1, c.rz * sL[0] / L0.sp[0]), y: Math.max(1, c.ry * sL[1] / L0.sp[1]), x: Math.max(1, c.rx * sL[2] / L0.sp[2]) };
     return { type: 'ellipsoid', id: 'd' + i, center: keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)), radii: keys.map((kk) => rad[kk] || 1) }; });
-  const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name));
   // the segmentation (voxel labels) is the result; the object centres / extents are an optional, hidden annotation layer
-  k.layers.push(segLayer(isVessel ? 'hwseg vessel segmentation' : 'hwseg cell segmentation', putSeg(P, blocks)));
-  if (!isVessel) k.layers.push({ type: 'annotation', name: LAYER, visible: false, annotationColor: '#ff3cc8', source: { url: 'local://annotations', transform: { outputDimensions: dimJSON } }, annotations: ann });
-  // the model's exposure becomes Neuroglancer's own window: log-domain lo / hi sliders of the layer shader
-  const img = k.layers.find((l) => l.type === 'image' && l.shaderControls !== undefined || l.type === 'image');
-  if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
-  k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';        // restoreState drops the displayed dimensions otherwise; the hook needs the x-y plane
-  lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);   // reset first: a plain restoreState keeps a broken display plane
+  const specs = [segLayer(isVessel ? 'hwseg vessel segmentation' : 'hwseg cell segmentation', putSeg(P, blocks))];
+  if (!isVessel) specs.push({ type: 'annotation', name: LAYER, visible: false, annotationColor: '#ff3cc8', source: { url: 'local://annotations', transform: { outputDimensions: dimJSON } }, annotations: ann });
+  lastView = viewKey();
+  if (!applyHwLayers(specs, rec)) {
+    const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name)).concat(specs);
+    const img = k.layers.find((l) => l.type === 'image'); if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
+    k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy'; viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
+  }
   say(`segmentation: ${isVessel ? 'vessel mask' : ann.length + ' cells'} over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
   const boxG = [[box_[2] * f + off[2], box_[3] * f + off[2]], [box_[0] * f + off[1], box_[1] * f + off[1]]];
   window.__hwNg.last = { fovG: [gx0_, gy0_], boxG, covers: boxG[0][0] <= gx0_[0] && boxG[0][1] >= gx0_[1] && boxG[1][0] <= gy0_[0] && boxG[1][1] >= gy0_[1], n: ann.length, model: m.model, level: m.level, planes: nz, tiles: use.length, fov: [box_[3] - box_[2], box_[1] - box_[0]], zspan: ann.length ? [Math.min(...comps.map((c) => c.z)), Math.max(...comps.map((c) => c.z))] : null, meanRz: comps.length ? comps.reduce((a_, c) => a_ + c.rz, 0) / comps.length : 0, edgeZ: comps.filter((c) => c.edgeZ).length };
@@ -292,11 +305,12 @@ viewer.state.changed.add(() => {                                              //
 });
 window.__hwNg.run = run; window.__hwNg.runModel = (key) => { $('hw-m').value = key; return run(); };
 window.__hwNg.regenSeg = async () => {                                        // drop cached volumes and give every segmentation layer a fresh source so Neuroglancer refetches (and we recompute)
-  const k = viewer.state.toJSON(); let n = 0; const stamp = Date.now().toString(36);
-  for (const l of k.layers || []) if (l.type === 'segmentation') { const u = typeof l.source === 'string' ? l.source : l.source && l.source.url; if (u && /virtual\/seg\//.test(u)) { const nu = u.replace(/(virtual\/seg\/[A-Za-z0-9_-]+)(\.[a-z0-9]+)?/, '$1.' + stamp); if (typeof l.source === 'string') l.source = nu; else l.source.url = nu; n++; } }
+  const j = viewer.state.toJSON(), stamp = Date.now().toString(36), lm = viewer.layerManager; let n = 0;
   for (const id of Object.keys(segJobs)) delete segJobs[id]; for (const id of Object.keys(segMetaC)) delete segMetaC[id];
-  if (n) { lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k); say(`regenerating ${n} segmentation layer(s) from their parameters...`); } else say('no segmentation layers in this view');
-  return n;
+  for (const l of j.layers || []) if (l.type === 'segmentation') { const u = typeof l.source === 'string' ? l.source : l.source && l.source.url;
+    if (u && /virtual\/seg\//.test(u)) { const spec = { ...l }, nu = u.replace(/(virtual\/seg\/[A-Za-z0-9_-]+)(\.[a-z0-9]+)?/, '$1.' + stamp); if (typeof l.source === 'string') spec.source = nu; else spec.source = { ...l.source, url: nu };
+      const old = lm.getLayerByName(l.name); if (old) lm.removeManagedLayer(old); lm.addManagedLayer(viewer.layerSpecification.getLayer(l.name, spec)); n++; } }
+  say(n ? `regenerating ${n} segmentation layer(s) from their parameters...` : 'no segmentation layers in this view'); return n;
 };
 window.__hwNg.setSegAlpha = setSegAlpha; window.__hwNg.getSegAlpha = () => segAlpha;
 window.__hwNg.setDepth = (n) => { $('hw-nz').value = String(n); };
