@@ -38,7 +38,9 @@ export const REF = {
     label: 'cellfinder candidate detection (Neurodesk JS port, classical)', kind: 'cells', dims: 3, px: null, url: null, zCtx: 8,   // + 8 planes each side: the 15 um ball filter needs depth before its first valid plane
     licence: 'BSD-3-Clause (cellfinder 1.10.1, Tyson et al.); no network weights',
     paper: 'Tyson et al., PLOS Comput Biol 2021',
-    cfg: { nSdsAboveMeanThresh: 10 },
+    // threshold mean + 3 SD of the filtered plane: cellfinder's default 10 SD (sparse labels in mouse whole-brain light-sheet) found no
+    // candidates at all in dense pan-nuclear YO windows (0 of ~400; 5 SD: 44, 3 SD: 390 on the same 208 x 208 window)
+    cfg: { nSdsAboveMeanThresh: 3 },
   },
   nd_vesselboost: {
     label: 'VesselBoost 3-D U-Net (Neurodesk reference, MRA-trained, experimental)', kind: 'vessels', dims: 3, px: null, zPatch: 64,

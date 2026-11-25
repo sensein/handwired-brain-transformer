@@ -2,7 +2,8 @@
 // Runs everything in headless Chromium exactly as the Neuroglancer hook does (WebGPU engine for our programs, onnxruntime-web
 // for the references), on windows streamed from DANDI 000108, and dumps the window + every label volume to OUT_DIR for
 // scripts/nd_compare.py (metrics, overlays). Env: DEMO_ROOT (demo/), OUT_DIR, PORT, EP (wasm|webgpu), CELLS / VESSELS (asset
-// specs "STAIN:SAMPLE,..."), CORE (window core, px), Z (planes incl. margins).
+// specs "STAIN:SAMPLE,..."), CORE (window core, px), Z (planes incl. margins), ONLY (models to (re)run, merged into meta.json),
+// DIAM (override the declared object diameter, um).
 import { chromium } from 'playwright';
 import http from 'http'; import fs from 'fs'; import path from 'path';
 const ROOT = process.env.DEMO_ROOT || path.resolve('demo'), OUT = process.env.OUT_DIR || 'nd_compare_out', PORT = +(process.env.PORT || 8391);
@@ -21,7 +22,7 @@ const assets = JSON.parse(fs.readFileSync(path.join(ROOT, 'assets.json')));
 const pick = (spec) => spec.split(',').filter(Boolean).map((s) => { const [stain, sample] = s.split(':'), rows = assets.filter((a) => a.stain === stain && a.sample === sample && a.sub === 'MITU01').sort((a, b) => a.chunk - b.chunk); return { stain, sample, zarr: rows[rows.length >> 1].zarr, chunk: rows[rows.length >> 1].chunk }; });
 const jobs = [...pick(process.env.CELLS ?? 'YO:90,YO:117,NN:40,NN:91').map((a) => ({ ...a, task: 'cells' })), ...pick(process.env.VESSELS ?? 'LEC:165,LEC:97').map((a) => ({ ...a, task: 'vessels' }))];
 const t00 = Date.now();
-const meta = await page.evaluate(async ({ jobs, EP, CORE, ZN }) => {
+const meta = await page.evaluate(async ({ jobs, EP, CORE, ZN, ONLY, DIAM }) => {
   globalThis.__hwNdEP = EP;
   const E = await import('/engine.js'), Zm = await import('/zarr.js'), S = await import('/seg.js'), I = await import('/instances.js'), N = await import('/nd/nd-seg.js');
   const engine = await E.GPUEngine.create(), index = await (await fetch('/models/index.json')).json();
@@ -41,14 +42,15 @@ const meta = await page.evaluate(async ({ jobs, EP, CORE, ZN }) => {
       const vol = await z.crop(0, z0, z1, y0, y1, x0, x1); await saveBin(`${name}__raw.f32`, b64(vol));
       const t1 = performance.now(), rec = await S.recommendExposure(z, engine, await prog('exposure'), 0, zc, y0, y1, x0, x1), adjust = (v) => S.adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma });
       rec0.exposure = rec;
-      const hand = job.task === 'cells' ? 'fable_blobs_v2' : 'fable_vessels_v2';
+      const hand = job.task === 'cells' ? 'fable_blobs_v2' : 'fable_vessels_v2', want = (k) => !ONLY || ONLY.split(',').includes(k);
+      if (want(hand)) {
       const r = await S.segVolume(z, engine, await prog(hand), 0, z0, z1, y0, y1, x0, x1, adjust, { halo: false });
       let lab;
       if (job.task === 'cells') { const t3 = I.components3(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h, r.nz); lab = t3.lab; rec0.models[hand] = { n: t3.n, s: (performance.now() - t1) / 1000 }; }
       else { lab = Uint32Array.from(S.labelVolume('vessels_ms', r)); rec0.models[hand] = { s: (performance.now() - t1) / 1000 }; }
-      await saveBin(`${name}__${hand}.u32`, b64(lab)); console.log(name, hand, JSON.stringify(rec0.models[hand]));
-      const refs = job.task === 'cells' ? ['nd_cellpose', 'nd_stardist', 'nd_cellfinder'] : ['nd_vesselboost'];
-      const diamUm = job.task === 'cells' ? (job.stain === 'NN' ? 16 : 10) : 8; rec0.diamUm = diamUm;
+      await saveBin(`${name}__${hand}.u32`, b64(lab)); console.log(name, hand, JSON.stringify(rec0.models[hand])); }
+      const refs = (job.task === 'cells' ? ['nd_cellpose', 'nd_stardist', 'nd_cellfinder'] : ['nd_vesselboost']).filter(want);
+      const diamUm = DIAM || (job.task === 'cells' ? (job.stain === 'NN' ? 16 : 10) : 8); rec0.diamUm = diamUm;
       for (const k of refs) {
         const t2 = performance.now();
         if (k === 'nd_vesselboost') {           // 64-plane context slab centred on the window, scored on the window's planes
@@ -67,7 +69,11 @@ const meta = await page.evaluate(async ({ jobs, EP, CORE, ZN }) => {
     }
   }
   return out;
-}, { jobs, EP: process.env.EP || 'wasm', CORE: +(process.env.CORE || 160), ZN: +(process.env.Z || 9) });
-fs.writeFileSync(path.join(OUT, 'meta.json'), JSON.stringify(meta, null, 1));
+}, { jobs, EP: process.env.EP || 'wasm', CORE: +(process.env.CORE || 160), ZN: +(process.env.Z || 9), ONLY: process.env.ONLY || '', DIAM: +(process.env.DIAM || 0) });
+const mf = path.join(OUT, 'meta.json');
+if (process.env.ONLY && fs.existsSync(mf)) {          // re-run of selected models: merge into the existing run's metadata
+  const old = JSON.parse(fs.readFileSync(mf)); for (const m of meta) { const o = old.find((x) => x.name === m.name); if (o) Object.assign(o.models, m.models); else old.push(m); }
+  fs.writeFileSync(mf, JSON.stringify(old, null, 1));
+} else fs.writeFileSync(mf, JSON.stringify(meta, null, 1));
 console.log(`done: ${meta.length} windows in ${((Date.now() - t00) / 60000).toFixed(1)} min -> ${OUT}`);
 await browser.close(); srv.close();

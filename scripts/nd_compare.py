@@ -97,7 +97,8 @@ def main():
             for i in range(len(ks)):
                 for j in range(i + 1, len(ks)):
                     A, B = obs[ks[i]], obs[ks[j]]; mt = match(A, B, tol); key = f"{ks[i]}|{ks[j]}"
-                    row["f1"][key] = 2 * len(mt) / max(len(A) + len(B), 1)
+                    row["f1"][key] = 2 * len(mt) / (len(A) + len(B)) if len(A) + len(B) else float("nan")
+                    row.setdefault("pool", {})[key] = (len(mt), len(A) + len(B))
                     row["iou"][key] = float(np.mean([iou(labs[ks[i]], labs[ks[j]], p, q) for p, q, _ in mt])) if mt else float("nan")
                     # chance: same counts, uniform random centroids in the scored volume
                     lo = np.array([mz - .5, M - .5, M - .5]) * sp; hi = np.array([Z - mz - .5, M + C - .5, M + C - .5]) * sp; f = []
@@ -126,8 +127,11 @@ def main():
         L.append("\n### Cells: centroid-matching F1 (chance F1 for the same counts) and mean IoU of matched objects\n")
         L.append("| window | " + " | ".join(f"{SHORT[p.split('|')[0]]} vs {SHORT[p.split('|')[1]]}" for p in pairs) + " |"); L.append("|---|" + "---|" * len(pairs))
         for r in summary["cells"]:
-            L.append(f"| {r['name']} | " + " | ".join(f"{r['f1'][p]:.2f} ({r['chance'][p]:.2f}) / {r['iou'][p]:.2f}" if p in r["f1"] else "-" for p in pairs) + " |")
-        L.append("| **mean** | " + " | ".join(f"**{np.mean([r['f1'][p] for r in summary['cells'] if p in r['f1']]):.2f}** ({np.mean([r['chance'][p] for r in summary['cells'] if p in r['chance']]):.2f}) / {np.nanmean([r['iou'][p] for r in summary['cells'] if p in r['iou']]):.2f}" for p in pairs) + " |")
+            L.append(f"| {r['name']} | " + " | ".join(("empty" if np.isnan(r['f1'][p]) else f"{r['f1'][p]:.2f} ({r['chance'][p]:.2f}) / {r['iou'][p]:.2f}") if p in r["f1"] else "-" for p in pairs) + " |")
+        def pooled(p):
+            m = sum(r["pool"][p][0] for r in summary["cells"] if p in r.get("pool", {})); n = sum(r["pool"][p][1] for r in summary["cells"] if p in r.get("pool", {}))
+            return 2 * m / n if n else float("nan")
+        L.append("| **pooled** (all matches / all objects) | " + " | ".join(f"**{pooled(p):.2f}** ({np.nanmean([r['chance'][p] for r in summary['cells'] if p in r['chance']]):.2f}) / {np.nanmean([r['iou'][p] for r in summary['cells'] if p in r['iou']]):.2f}" for p in pairs) + " |")
         L.append("\n### Cells: equivalent diameter of 3-D objects (um), median [IQR], pooled per stain\n")
         L.append("| stain | " + " | ".join(SHORT[k] for k in CELL_MODELS) + " |"); L.append("|---|" + "---|" * len(CELL_MODELS))
         for st in sorted({r["stain"] for r in summary["cells"]}):

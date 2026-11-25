@@ -104,7 +104,8 @@ function imageSource(j) {
   if (!ids.length) throw new Error('image layer is not a DANDI zarr source'); return { ids, virtual: false, seams: false };
 }
 async function openSource({ ids, virtual, seams }) {
-  say(`opening ${ids.length > 1 || virtual ? `stitched slab (${ids.length} strips)` : 'strip'}...`);
+  const cached = ids.length > 1 || virtual ? slabCache[ids.join('+') + (virtual && seams ? 's' : '')] : sources[ids[0]];
+  if (!cached) say(`opening ${ids.length > 1 || virtual ? `stitched slab (${ids.length} strips)` : 'strip'}...`);   // not on every chunk request
   const z = virtual ? await getSlab(ids, seams) : (ids.length > 1 ? await getSlab(ids, false) : (sources[ids[0]] ||= await (async () => { const q = new Zarr(ids[0]); await q.init(); return q; })()));
   // zarr sources: Neuroglancer places each zarr at its OME translation (global voxel = local index + translation / voxel size);
   // the virtual volume's own grid starts at 0.
@@ -211,7 +212,7 @@ async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
     box_ = [clamp(Math.floor((gy[0] - off[1]) / f), 0, L.shape[1] - 1), clamp(Math.ceil((gy[1] - off[1]) / f), 1, L.shape[1]), clamp(Math.floor((gx[0] - off[2]) / f), 0, L.shape[2] - 1), clamp(Math.ceil((gx[1] - off[2]) / f), 1, L.shape[2])];
     if ((2 * hz + 1) * (box_[1] - box_[0]) * (box_[3] - box_[2]) <= Math.floor(engine.maxTokens(dmax) * 0.6) || level >= zarr.top) break; level++;
   }
-  const f = 2 ** level, L = zarr.levels[level], zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
+  const f = 2 ** level, L = zarr.levels[level], zl = clamp(Math.floor(lz / f), 0, L.shape[0] - 1);   // Neuroglancer voxel k spans [k, k+1): the displayed plane is floor, not round
   say(`regions on ${box_[3] - box_[2]}x${box_[1] - box_[0]} voxels at level ${level}: streaming...`);
   const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), level, zl, box_[0], box_[1], box_[2], box_[3]);
   const adjust = (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma });
@@ -252,7 +253,7 @@ async function detect() {
   let refLevel = 0; if (ref) for (let l = 0; l <= Math.min(2, zarr.top); l++) if (diamUm / zarr.levels[l].sp[2] >= 4) refLevel = l;
   const m = ref ? { model: key, level: refLevel } : scaledModel(family, umPerPx, zarr), f = 2 ** m.level, L = zarr.levels[m.level];
   const box_ = [clamp(Math.floor(ly[0] / f), 0, L.shape[1] - 1), clamp(Math.ceil(ly[1] / f), 1, L.shape[1]), clamp(Math.floor(lx[0] / f), 0, L.shape[2] - 1), clamp(Math.ceil(lx[1] / f), 1, L.shape[2])];
-  const nzWant = Math.max(1, +$('hw-nz').value || 1), zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
+  const nzWant = Math.max(1, +$('hw-nz').value || 1), zl = clamp(Math.floor(lz / f), 0, L.shape[0] - 1);   // Neuroglancer voxel k spans [k, k+1): the displayed plane is floor, not round
   const zA = clamp(zl - (nzWant >> 1), 0, Math.max(0, L.shape[0] - nzWant)), zB = Math.min(L.shape[0], zA + nzWant), nz = zB - zA;   // slab [zA,zB) centred on the displayed plane
   const mz = nz > 1 || (ref && REF[key].dims === 3) ? Math.min(4, Math.ceil(10 / L.sp[0])) : 0; let zA2 = Math.max(0, zA - mz), zB2 = Math.min(L.shape[0], zB + mz);
   if (ref && REF[key].zCtx) { zA2 = Math.max(0, zA - REF[key].zCtx); zB2 = Math.min(L.shape[0], zB + REF[key].zCtx); }
@@ -303,9 +304,14 @@ window.__hwNg.run = run; window.__hwNg.runModel = (key) => { $('hw-m').value = k
 window.__hwNg.regenSeg = async () => {                                        // drop cached volumes and give every segmentation layer a fresh source so Neuroglancer refetches (and we recompute)
   const j = viewer.state.toJSON(), stamp = Date.now().toString(36), lm = viewer.layerManager; let n = 0;
   for (const id of Object.keys(segJobs)) delete segJobs[id]; for (const id of Object.keys(segMetaC)) delete segMetaC[id];
+  const specs = [];
   for (const l of j.layers || []) if (l.type === 'segmentation') { const u = typeof l.source === 'string' ? l.source : l.source && l.source.url;
-    if (u && /virtual\/seg\//.test(u)) { const spec = { ...l }, nu = u.replace(/(virtual\/seg\/[A-Za-z0-9_-]+)(\.[a-z0-9]+)?/, '$1.' + stamp); if (typeof l.source === 'string') spec.source = nu; else spec.source = { ...l.source, url: nu };
-      const old = lm.getLayerByName(l.name); if (old) lm.removeManagedLayer(old); lm.addManagedLayer(viewer.layerSpecification.getLayer(l.name, spec)); n++; } }
+    if (u && /virtual\/seg\//.test(u)) { const spec = { ...l }, nu = u.replace(/(virtual\/seg\/[A-Za-z0-9_-]+)(\.[a-z0-9]+)?/, '$1.' + stamp); if (typeof l.source === 'string') spec.source = nu; else spec.source = { ...l.source, url: nu }; specs.push(spec); n++; } }
+  if (viewer.layerSpecification && typeof viewer.layerSpecification.getLayer === 'function') {
+    for (const spec of specs) { const old = lm.getLayerByName(spec.name); if (old) lm.removeManagedLayer(old); lm.addManagedLayer(viewer.layerSpecification.getLayer(spec.name, spec)); }
+  } else if (specs.length) {                                                   // this Neuroglancer build has no layerSpecification.getLayer: rewrite the state instead
+    const k = JSON.parse(JSON.stringify(j)); k.layers = (k.layers || []).map((l) => specs.find((sp_) => sp_.name === l.name) || l); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k); lastView = viewKey();
+  }
   say(n ? `regenerating ${n} segmentation layer(s) from their parameters...` : 'no segmentation layers in this view'); return n;
 };
 window.__hwNg.setSegAlpha = setSegAlpha; window.__hwNg.getSegAlpha = () => segAlpha;

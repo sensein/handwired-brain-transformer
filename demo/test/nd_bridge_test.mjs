@@ -22,7 +22,7 @@ await page.waitForTimeout(6000);
 const opts = await page.evaluate(() => [...document.querySelectorAll('#hw-m option')].map((o) => o.value));
 if (!opts.includes(MODEL)) { console.log('FAIL: model not in the hook dropdown', opts); process.exit(1); }
 await page.selectOption('#hw-m', MODEL); await page.evaluate((d) => window.__hwNg.setDepth(d), process.env.DEPTH || '1');
-const wait = async (t0) => { let st = ''; while (Date.now() - t0 < 840000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/segmentation:|error/.test(st)) break; } return st; };
+const wait = async (t0) => { let st = ''; while (Date.now() - t0 < 840000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.events.map((e) => e.msg).filter((m) => /^segmentation:|^error/.test(m)).pop() || ''); if (st) break; } return st; };
 let t0 = Date.now(); await page.click('#hw-run'); const st = await wait(t0);
 console.log('status:', st, `(${((Date.now() - t0) / 1000).toFixed(0)} s)`);
 const last = await page.evaluate(() => window.__hwNg.last); console.log('last:', JSON.stringify(last));
@@ -30,7 +30,7 @@ const last = await page.evaluate(() => window.__hwNg.last); console.log('last:',
 const grid = async () => page.evaluate(async () => {
   const j = window.viewer.state.toJSON(), l = j.layers.find((x) => x.type === 'segmentation'); if (!l) return null;
   const base = String(l.source.url || l.source).replace(/^precomputed:\/\//, ''), info = await (await fetch(base + '/info')).json(), s0 = info.scales[0], vo = s0.voxel_offset;
-  const b = window.__hwNg.last.boxG, z = Math.round(j.position[1]), cells = [];
+  const b = window.__hwNg.last.boxG, z = Math.floor(j.position[1]), cells = [];
   for (let iy = 0; iy < 4; iy++) for (let ix = 0; ix < 4; ix++) {
     const x0 = Math.round(b[0][0] + (ix + 0.5) * (b[0][1] - b[0][0]) / 4) - 24, y0 = Math.round(b[1][0] + (iy + 0.5) * (b[1][1] - b[1][0]) / 4) - 24;
     const a = new Uint32Array(await (await fetch(`${base}/0/${x0}-${x0 + 48}_${y0}-${y0 + 48}_${z}-${z + 1}`)).arrayBuffer());
@@ -41,7 +41,8 @@ const grid = async () => page.evaluate(async () => {
 const g1 = await grid(); console.log('GRID', JSON.stringify(g1));
 await page.waitForTimeout(2500); await page.screenshot({ path: `${OUT}/nd_${MODEL}_after.png` });
 // regeneration from the source-URL parameters (what a shared link does)
-t0 = Date.now(); await page.evaluate(() => window.__hwNg.regenSeg()); await page.waitForTimeout(1500);
+t0 = Date.now(); await page.evaluate(() => window.__hwNg.regenSeg());
+await page.waitForFunction(() => { const l = (window.viewer.state.toJSON().layers || []).find((x) => x.type === 'segmentation'); return l && /virtual\/seg\/[A-Za-z0-9_-]+\.[a-z0-9]+/.test(JSON.stringify(l.source)); }, null, { timeout: 60000 });
 const g2 = await grid(); console.log('REGEN', JSON.stringify(g2), `(${((Date.now() - t0) / 1000).toFixed(0)} s)`);
 const occupied = (g) => (g && g.ids ? g.ids.filter((n) => n > 0).length : 0);
 const ok = /segmentation:/.test(st) && last && last.n > 0 && last.covers && occupied(g1) >= 12 && occupied(g2) >= 12;
