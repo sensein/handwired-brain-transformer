@@ -51,6 +51,7 @@
     <h1>Handwired Brain Transformer</h1>
     <p class="sub">DANDI 000108 light-sheet human brain in Neuroglancer, with weight-programmed models running on your GPU (WebGPU).</p>
     <label for="stain">Stain</label><select id="stain"></select>
+    <label for="sub">Subject</label><select id="sub"></select>
     <label for="sample">Sample (slab)</label><select id="sample"></select>
     <label for="session">Acquisition</label><select id="session"></select>
     <label for="mode">View</label><select id="mode"><option value="slab">whole slab (strips stitched)</option><option value="strip">one strip</option></select>
@@ -62,8 +63,10 @@
     <label for="depth">Depth (z planes the detector sees)</label><select id="depth"><option value="1">1 plane (2-D)</option><option value="5">5 planes</option><option value="9" selected>9 planes (3-D)</option><option value="15">15 planes</option><option value="25">25 planes</option></select>
     <button id="run" class="primary">Run on this view</button>
     <label class="check"><input type="checkbox" id="auto"> re-run when the view settles</label>
+    <label for="segalpha">Segmentation opacity <span id="segalpha-v">55%</span></label><input type="range" id="segalpha" min="0" max="100" value="55" style="width:100%">
     <button id="fit">Fit whole slab</button>
-    <button id="copy">Copy link to this Neuroglancer state</button>
+    <button id="copy">Copy link to this view</button>
+    <button id="regen" title="Recompute the segmentation layers from their stored parameters (they are held in memory, not uploaded)">Regenerate segmentations</button>
     <dl id="info"></dl>
     <p class="legend note" id="legend"></p>
     <p class="note">Contrast, brightness and gamma are Neuroglancer's own layer controls (the shader panel on the right: lo / hi / contrast / brightness / gamma); the model's recommended window is applied after each run. Model results are segmentation layers (voxel labels computed in your browser and served to Neuroglancer from memory): cells get one id each, vessels class labels, tissue / white matter two classes. Cell centres and extents are a hidden annotation layer you can switch on.</p>

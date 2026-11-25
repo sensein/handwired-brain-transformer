@@ -198,6 +198,12 @@ touching cells into tall ellipsoids and was dropped; a track also ends where its
 and the linked blobs are the cell labels; each object also gets an (optional, hidden) ellipsoid with a measured in-plane radius (largest cross-section) and z radius (area-weighted spread, r = sqrt(5 var)). A detection belongs
 to the slab if its centre lies in it; tile cores own detections in x-y. The attention itself already spans z, but with a thin
 radius (cells ~5 um, vessels 2.5-6 um) so z context is a few planes; tissue and cortex/white-matter stay 2-D contours.
+Selection is by (subject, stain, sample): slab numbers repeat across subjects (e.g. sample 28 is one MITU01 acquisition and two SChmi53 ones),
+so the sidebar has a Subject selector (MITU01 first, as in the BICCN dashboard). "Copy link to this view" produces a link to this page with the
+sidebar choices and the full Neuroglancer state (layers, view, shader, selected panel, segmentation opacity). Segmentation layers hold their run
+parameters (model, level, box, z slab, exposure, image source) in the layer's source URL, so whoever opens the link regenerates them on demand in
+their own browser; "Regenerate segmentations" recomputes them in the current page. A run covers the visible field of view plus a 15% margin,
+and the "Segmentation opacity" slider sets Neuroglancer's own selected-segment opacity.
 Cortex / white-matter and layer programs are only routed at pyramid level >= 5 (coarse): the cortex boundary is a fixed
 distance from the pia and is not scale-invariant. Levels 0-2 need a field of view above ~10 mm, larger than a GPU buffer, so
 region programs are not tested there.

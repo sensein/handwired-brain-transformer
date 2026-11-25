@@ -11,7 +11,7 @@ async function host() {   // a window that has registered as the compute host (a
   return null;
 }
 function ask(client, msg) {
-  return new Promise((resolve, reject) => { const ch = new MessageChannel(); const t = setTimeout(() => reject(new Error('virtual volume host timed out')), 120000);
+  return new Promise((resolve, reject) => { const ch = new MessageChannel(); const t = setTimeout(() => reject(new Error('virtual volume host timed out')), 1800000);
     ch.port1.onmessage = (ev) => { clearTimeout(t); resolve(ev.data); }; client.postMessage(msg, [ch.port2]); });
 }
 self.addEventListener('fetch', (e) => {

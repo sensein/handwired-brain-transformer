@@ -26,30 +26,39 @@ async function serveVirtual(idsStr, path) {
 }
 
 // ---- segmentation volume: model output as a Neuroglancer `precomputed` segmentation layer, served by the service worker from memory
-const segStore = {};
-function serveSeg(id, path) {
-  const S = segStore[id]; if (!S) return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) };
+let segAlpha = 0.55;
+const segStore = {}, segJobs = {}, segMetaC = {};
+// The layer's source URL carries the run parameters (model, level, box, z slab, exposure, image source) as the volume id, so a
+// shared link regenerates the segmentation on demand in whoever opens it; nothing has to be uploaded or stored.
+const b64e = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64d = (t) => JSON.parse(decodeURIComponent(escape(atob(t.replace(/-/g, '+').replace(/_/g, '/')))));
+async function segMeta(P) { const src = await openSource(P.src), L = src.z.levels[P.level], f = 2 ** P.level;
+  return { size: [L.shape[2], L.shape[1], L.shape[0]], res: [L.sp[2] * 1000, L.sp[1] * 1000, L.sp[0] * 1000], vo: [Math.round(src.off[2] / f), Math.round(src.off[1] / f), Math.round(src.off[0] / f)] }; }
+async function serveSeg(idFull, path) {
+  const id = idFull.split('.')[0]; let P; try { P = b64d(id); } catch (e) { return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) }; }
+  const S = await (segMetaC[id] ||= segMeta(P));
   if (path === 'info') return { type: 'application/json', body: new TextEncoder().encode(JSON.stringify({ '@type': 'neuroglancer_multiscale_volume', type: 'segmentation', data_type: 'uint32', num_channels: 1,
     scales: [{ key: '0', size: S.size, resolution: S.res, chunk_sizes: [[64, 64, 16]], encoding: 'raw', voxel_offset: S.vo }] })).buffer };
-  const m = path.match(/^0\/(\d+)-(\d+)_(\d+)-(\d+)_(\d+)-(\d+)$/); if (!m) return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) };
+  const m = path.match(/^0\/(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)$/); if (!m) return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) };
   const [x0, x1, y0, y1, z0, z1] = m.slice(1).map(Number), W = x1 - x0, H = y1 - y0, out = new Uint32Array(W * H * (z1 - z0));    // x fastest
-  for (const b of S.blocks) {                                                    // blocks hold local voxel indices of the level
+  const blocks = await (segJobs[id] ||= computeSeg(P).then((r) => r.blocks));      // regenerated on first request when this page did not compute it
+  for (const b of blocks) {                                                      // blocks hold local voxel indices of the level
     const gx0 = Math.max(x0, b.x0 + S.vo[0]), gx1 = Math.min(x1, b.x1 + S.vo[0]), gy0 = Math.max(y0, b.y0 + S.vo[1]), gy1 = Math.min(y1, b.y1 + S.vo[1]), gz0 = Math.max(z0, b.z0 + S.vo[2]), gz1 = Math.min(z1, b.z1 + S.vo[2]);
     if (gx0 >= gx1 || gy0 >= gy1 || gz0 >= gz1) continue; const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
     for (let z = gz0; z < gz1; z++) for (let y = gy0; y < gy1; y++) { let o = ((z - z0) * H + (y - y0)) * W + (gx0 - x0), q = ((z - S.vo[2] - b.z0) * bh + (y - S.vo[1] - b.y0)) * bw + (gx0 - S.vo[0] - b.x0); for (let x = gx0; x < gx1; x++) out[o++] = b.lab[q++]; }
   }
   return { type: 'application/octet-stream', body: out.buffer };
 }
-function putSeg(level, L, off, f, blocks) {                                    // register a segmentation and return its layer source URL
-  const id = Date.now().toString(36); const keep = Object.keys(segStore); if (keep.length > 3) delete segStore[keep[0]];
-  segStore[id] = { size: [L.shape[2], L.shape[1], L.shape[0]], res: [L.sp[2] * 1000, L.sp[1] * 1000, L.sp[0] * 1000], vo: [Math.round(off[2] / f), Math.round(off[1] / f), Math.round(off[0] / f)], blocks };
+function putSeg(P, blocks) {                                                   // register a freshly computed segmentation and return its layer source URL
+  const id = b64e(P); const keep = Object.keys(segJobs); if (keep.length > 4) { delete segJobs[keep[0]]; delete segMetaC[keep[0]]; }
+  segJobs[id] = Promise.resolve(blocks);
   return 'precomputed://' + new URL('../virtual/seg/' + id, import.meta.url).href;
 }
-const segLayer = (name, source, extra = {}) => ({ type: 'segmentation', name, source, selectedAlpha: 0.55, notSelectedAlpha: 0, ...extra });
+const segLayer = (name, source, extra = {}) => ({ type: 'segmentation', name, source, selectedAlpha: segAlpha, notSelectedAlpha: 0, tab: 'rendering', ...extra });
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', async (ev) => {
     const m = ev.data; if (!m || m.kind !== 'virtual') return; const port = ev.ports[0];
-    try { const r = m.which === 'seg' ? serveSeg(m.ids, m.path) : await serveVirtual(m.ids, m.path); port.postMessage(r, [r.body]); }
+    try { const r = m.which === 'seg' ? await serveSeg(m.ids, m.path) : await serveVirtual(m.ids, m.path); port.postMessage(r, [r.body]); }
     catch (e) { port.postMessage({ status: 500, type: 'text/plain', body: new TextEncoder().encode(String(e)).buffer }); }
   });
   navigator.serviceWorker.register(new URL('sw.js', import.meta.url).href).then(async () => {
@@ -154,10 +163,52 @@ function contourSegments(mask, w, h) {
   }
   return segs;
 }
+// The run covers the visible field of view plus a 15% margin on every side: the viewport can change once the layer panel opens or the
+// window is resized, and the probe reads the view at the moment of the click.
+const padRange = ([a, b]) => { const m = 0.15 * (b - a); return [a - m, b + m]; };
+function setSegAlpha(a) {                                                      // Neuroglancer's own selected-segment opacity, on every segmentation layer
+  segAlpha = Math.max(0, Math.min(1, +a)); let n = 0;
+  for (const ml of viewer.layerManager.managedLayers) { const ds = ml.layer && ml.layer.displayState; if (ds && ds.selectedAlpha) { ds.selectedAlpha.value = segAlpha; n++; } }
+  return n;
+}
+// ---- compute a segmentation from its parameters (also used to regenerate one from a shared link)
+async function computeSeg(P) {
+  for (let i = 0; i < 1800 && !window.__hwNg.ready; i++) await sleep(100);
+  if (!engine) throw new Error('no WebGPU: segmentation unavailable');
+  const src = await openSource(P.src), zarr = src.z, L = zarr.levels[P.level], adjust = (v) => adjustLogVol(v, P.rec.lo, P.rec.hi, { b: 0, c: 1, g: P.rec.gamma });
+  if (P.kind === 'regions') {
+    const progT = await getProgram('fable_tissue'), progC = await getProgram('fable_cortex_wm'), [y0, y1, x0, x1] = P.box;
+    say('regions: tissue program on WebGPU...'); const rT = await segRegion(zarr, engine, progT, P.level, P.zl, y0, y1, x0, x1, adjust, { halo: false });
+    say('regions: cortex / white-matter program on WebGPU...'); const rC = await segRegion(zarr, engine, progC, P.level, P.zl, y0, y1, x0, x1, adjust, { halo: false });
+    const w = rT.w, h = rT.h, tis = new Uint8Array(w * h), wm = new Uint8Array(w * h), lab = new Uint32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const q = y * w + x; tis[q] = rT.out.tissue[(rT.oy + y) * rT.dims[2] + rT.ox + x] > 0.5 ? 1 : 0; wm[q] = rC.out.wm[(rC.oy + y) * rC.dims[2] + rC.ox + x] > 0.5 ? 1 : 0; lab[q] = tis[q] ? (wm[q] ? 2 : 1) : 0; }   // 1 = gray matter, 2 = white matter
+    return { blocks: [{ x0, x1, y0, y1, z0: P.zl, z1: P.zl + 1, lab }], tis, wm, w, h };
+  }
+  const isVessel = P.kind === 'vessels', prog = await getProgram(P.model), box_ = P.box, { zA, zB, zA2, zB2 } = P, nz = zB - zA, hal = 32;
+  const [hz] = haloFor(prog, L.sp), Zin = Math.min(L.shape[0], (zB2 - zA2) + 2 * hz);
+  const side = Math.max(96 + 2 * hal, Math.min(512, Math.floor(Math.sqrt(engine.maxTokens(prog.d) * 0.8 / Zin)))), core = side - 2 * hal;   // tile side that keeps (slab + z halo) tokens within the device buffer
+  const cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;
+  const tiles = []; for (let ty = box_[0]; ty < box_[1]; ty += core) for (let tx = box_[2]; tx < box_[3]; tx += core) tiles.push([ty, Math.min(ty + core, box_[1]), tx, Math.min(tx + core, box_[3])]);
+  tiles.sort((p, q) => Math.hypot((p[0] + p[1]) / 2 - cy, (p[2] + p[3]) / 2 - cx) - Math.hypot((q[0] + q[1]) / 2 - cy, (q[2] + q[3]) / 2 - cx));   // centre first
+  const MAXT = 100, use = tiles.slice(0, MAXT), comps = [], blocks = []; let idBase = 0;
+  for (let ti = 0; ti < use.length; ti++) {
+    const [cy_0, cy_1, cx_0, cx_1] = use[ti], Y0 = Math.max(0, cy_0 - hal), Y1 = Math.min(L.shape[1], cy_1 + hal), X0 = Math.max(0, cx_0 - hal), X1 = Math.min(L.shape[2], cx_1 + hal);
+    say(`${P.model}: tile ${ti + 1}/${use.length} (${X1 - X0}x${Y1 - Y0}x${nz} planes, level ${P.level}) on WebGPU...`);
+    const r = await segVolume(zarr, engine, prog, P.level, zA2, zB2, Y0, Y1, X0, X1, adjust, { halo: false });
+    const lx0 = cx_0 - X0, lx1 = cx_1 - X0, ly0 = cy_0 - Y0, ly1 = cy_1 - Y0, cw = lx1 - lx0, chh = ly1 - ly0, plane = r.h * r.w; let full;
+    if (isVessel) full = labelVolume(FAMILIES[P.family].kind, r);                 // class labels from the program's own channels (1 = capillary, 2 = vessel, ...)
+    else { const t3 = components3(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h, r.nz, idBase); idBase += t3.n; full = t3.lab;   // one id per linked cell
+      for (const c of t3.objs) { const gy_ = Y0 + c.y, gx_ = X0 + c.x, gz_ = zA2 + c.z; if (gy_ >= cy_0 && gy_ < cy_1 && gx_ >= cx_0 && gx_ < cx_1 && gz_ >= zA - 0.5 && gz_ < zB - 0.5) comps.push({ ...c, y: gy_, x: gx_, z: gz_ }); } }
+    const lab = new Uint32Array(cw * chh * r.nz);                                  // keep only this tile's core: tiles abut without overlap
+    for (let z = 0; z < r.nz; z++) for (let y = 0; y < chh; y++) { const sx = z * plane + (ly0 + y) * r.w + lx0, dst = (z * chh + y) * cw; for (let x = 0; x < cw; x++) lab[dst + x] = full[sx + x]; }
+    blocks.push({ x0: cx_0, x1: cx_1, y0: cy_0, y1: cy_1, z0: zA2, z1: zA2 + r.nz, lab });
+  }
+  return { blocks, comps, nTiles: tiles.length, nUsed: use.length };
+}
 async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   const keys = Object.keys(d), pos = j.position || [];
   const m0 = scaledModel('fable_cortex_wm', umPerPx, zarr), progT = await getProgram('fable_tissue'), progC = await getProgram('fable_cortex_wm');
-  const A = axisIdx(d), gx = [fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b), gy = [fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b), lz = fov.c[A.z] - off[0];
+  const A = axisIdx(d), gx = padRange([fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b)), gy = padRange([fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b)), lz = fov.c[A.z] - off[0];
   const dmax = Math.max(progT.d, progC.d); let level = m0.level, box_;
   for (;;) {                                                                       // coarsen until the whole FOV fits one pass
     const f = 2 ** level, L = zarr.levels[level], hz = Math.max(haloFor(progT, L.sp)[0], haloFor(progC, L.sp)[0]);
@@ -168,20 +219,15 @@ async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   say(`regions on ${box_[3] - box_[2]}x${box_[1] - box_[0]} voxels at level ${level}: streaming...`);
   const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), level, zl, box_[0], box_[1], box_[2], box_[3]);
   const adjust = (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma });
-  say('regions: tissue program on WebGPU...');
-  const rT = await segRegion(zarr, engine, progT, level, zl, box_[0], box_[1], box_[2], box_[3], adjust, { halo: false });
-  say('regions: cortex / white-matter program on WebGPU...');
-  const rC = await segRegion(zarr, engine, progC, level, zl, box_[0], box_[1], box_[2], box_[3], adjust, { halo: false });
-  const w = rT.w, h = rT.h, tis = new Uint8Array(w * h), wm = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const q = y * w + x; tis[q] = rT.out.tissue[(rT.oy + y) * rT.dims[2] + rT.ox + x] > 0.5 ? 1 : 0; wm[q] = rC.out.wm[(rC.oy + y) * rC.dims[2] + rC.ox + x] > 0.5 ? 1 : 0; }
+  const P = { kind: 'regions', level, zl, box: box_, rec: { lo: +rec.lo.toFixed(4), hi: +rec.hi.toFixed(4), gamma: +rec.gamma.toFixed(4) }, src: imageSource(j) };
+  const R = await computeSeg(P), { tis, wm, w, h } = R;
   const toG = (p) => { const g = { z: zl * f + off[0], y: (box_[0] + p[1]) * f + off[1], x: (box_[2] + p[0]) * f + off[2] }; return keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)); };
   const mk = (segs, tag) => segs.map((s2, i) => ({ type: 'line', id: tag + i, pointA: toG(s2[0]), pointB: toG(s2[1]) }));
   const layers = [['hwseg tissue outline', '#ffd23c', mk(contourSegments(tis, w, h), 't')], ['hwseg cortex/white-matter boundary', '#3cd2ff', mk(contourSegments(wm, w, h), 'w')]];
   const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name));
   const LINE_SHADER = 'void main() { setColor(defaultColor()); setLineWidth(1.5); setEndpointMarkerSize(0.0); setEndpointMarkerBorderWidth(0.0); }';   // thin lines, no endpoint markers
   for (const [name, col, ann] of layers) k.layers.push({ type: 'annotation', name, annotationColor: col, shader: LINE_SHADER, source: { url: 'local://annotations', transform: { outputDimensions: Object.fromEntries(keys.map((kk) => [kk, d[kk]])) } }, annotations: ann });
-  const lab = new Uint32Array(w * h); for (let q = 0; q < w * h; q++) lab[q] = tis[q] ? (wm[q] ? 2 : 1) : 0;        // 1 = gray matter (tissue, not white matter), 2 = white matter; only the displayed plane is computed
-  k.layers.splice(1, 0, segLayer('hwseg tissue / white-matter segmentation', putSeg(level, L, off, f, [{ x0: box_[2], x1: box_[3], y0: box_[0], y1: box_[1], z0: zl, z1: zl + 1, lab }]), { segmentColors: { 1: '#ffa028', 2: '#3c8cff' } }));
+  k.layers.splice(1, 0, segLayer('hwseg tissue / white-matter segmentation', putSeg(P, R.blocks), { segmentColors: { 1: '#ffa028', 2: '#3c8cff' } }));
   const img = k.layers.find((l) => l.type === 'image');
   if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
   k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';
@@ -196,7 +242,7 @@ async function detect() {
   const j = viewer.state.toJSON(), disp = j.displayDimensions, fov = await probeFov();
   const d = j.dimensions || {}, sp0 = { z: d.z && d.z[0], y: d.y && d.y[0], x: d.x && d.x[0] }; if (!sp0.x) throw new Error('state has no x/y/z dimensions');
   const src = await openSource(imageSource(j)), zarr = src.z, off = src.off, L0 = zarr.levels[0], A = axisIdx(d);
-  const gx = [fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b), gy = [fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b), gz = fov.c[A.z];
+  const gx0_ = [fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b), gy0_ = [fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b), gx = padRange(gx0_), gy = padRange(gy0_), gz = fov.c[A.z];
   if (!(gx[1] - gx[0] > 1 && gy[1] - gy[0] > 1)) throw new Error('show the x-y plane (displayDimensions x, y, z and layout xy)');
   // level-0 local voxel box of the FOV
   const lx = [gx[0] - off[2], gx[1] - off[2]], ly = [gy[0] - off[1], gy[1] - off[1]], lz = gz - off[0];
@@ -208,29 +254,12 @@ async function detect() {
   const nzWant = Math.max(1, +$('hw-nz').value || 1), zl = clamp(Math.round(lz / f), 0, L.shape[0] - 1);
   const zA = clamp(zl - (nzWant >> 1), 0, Math.max(0, L.shape[0] - nzWant)), zB = Math.min(L.shape[0], zA + nzWant), nz = zB - zA;   // slab [zA,zB) centred on the displayed plane
   const mz = nz > 1 ? Math.min(4, Math.ceil(10 / L.sp[0])) : 0, zA2 = Math.max(0, zA - mz), zB2 = Math.min(L.shape[0], zB + mz);   // margin planes so objects cut by the slab edge keep their full z extent; a detection belongs to the slab if its centre is inside [zA,zB)
-  const [hz] = haloFor(prog, L.sp), Zin = Math.min(L.shape[0], (zB2 - zA2) + 2 * hz), hal = 32;
-  const side = Math.max(96 + 2 * hal, Math.min(512, Math.floor(Math.sqrt(engine.maxTokens(prog.d) * 0.8 / Zin))));   // tile side that keeps (slab + z halo) tokens within the device buffer
-  const core = side - 2 * hal;
   const cy = (box_[0] + box_[1]) >> 1, cx = (box_[2] + box_[3]) >> 1;
   const cy0 = Math.max(0, cy - 192), cy1 = Math.min(L.shape[1], cy + 192), cx0 = Math.max(0, cx - 192), cx1 = Math.min(L.shape[2], cx + 192);
   say(`${m.model}: streaming exposure window...`);
-  const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, cy0, cy1, cx0, cx1);
-  // the whole field of view is covered by overlapping tiles (core + halo, one GPU pass each over the whole z slab); a detection belongs to the tile whose core holds its centre
-  const tiles = []; for (let ty = box_[0]; ty < box_[1]; ty += core) for (let tx = box_[2]; tx < box_[3]; tx += core) tiles.push([ty, Math.min(ty + core, box_[1]), tx, Math.min(tx + core, box_[3])]);
-  tiles.sort((p, q) => Math.hypot((p[0] + p[1]) / 2 - cy, (p[2] + p[3]) / 2 - cx) - Math.hypot((q[0] + q[1]) / 2 - cy, (q[2] + q[3]) / 2 - cx));   // centre first
-  const MAXT = 100, use = tiles.slice(0, MAXT), comps = [], blocks = [], isVessel = /^vessels/.test(FAMILIES[family].kind); let idBase = 0;
-  for (let ti = 0; ti < use.length; ti++) {
-    const [cy_0, cy_1, cx_0, cx_1] = use[ti], Y0 = Math.max(0, cy_0 - hal), Y1 = Math.min(L.shape[1], cy_1 + hal), X0 = Math.max(0, cx_0 - hal), X1 = Math.min(L.shape[2], cx_1 + hal);
-    say(`${m.model}: tile ${ti + 1}/${use.length} (${X1 - X0}x${Y1 - Y0}x${nz} planes, level ${m.level}) on WebGPU...`);
-    const r = await segVolume(zarr, engine, prog, m.level, zA2, zB2, Y0, Y1, X0, X1, (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma }), { halo: false });
-    const lx0 = cx_0 - X0, lx1 = cx_1 - X0, ly0 = cy_0 - Y0, ly1 = cy_1 - Y0, cw = lx1 - lx0, chh = ly1 - ly0, plane = r.h * r.w; let full;
-    if (isVessel) full = labelVolume(FAMILIES[family].kind, r);                   // class labels from the program's own channels (1 = capillary, 2 = vessel, ...)
-    else { const t3 = components3(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h, r.nz, idBase); idBase += t3.n; full = t3.lab;   // one id per linked cell
-      for (const c of t3.objs) { const gy_ = Y0 + c.y, gx_ = X0 + c.x, gz_ = zA2 + c.z; if (gy_ >= cy_0 && gy_ < cy_1 && gx_ >= cx_0 && gx_ < cx_1 && gz_ >= zA - 0.5 && gz_ < zB - 0.5) comps.push({ ...c, y: gy_, x: gx_, z: gz_ }); } }
-    const lab = new Uint32Array(cw * chh * r.nz);                                  // keep only this tile's core: tiles abut without overlap
-    for (let z = 0; z < r.nz; z++) for (let y = 0; y < chh; y++) { const src = z * plane + (ly0 + y) * r.w + lx0, dst = (z * chh + y) * cw; for (let x = 0; x < cw; x++) lab[dst + x] = full[src + x]; }
-    blocks.push({ x0: cx_0, x1: cx_1, y0: cy_0, y1: cy_1, z0: zA2, z1: zA2 + r.nz, lab });
-  }
+  const rec = await recommendExposure(zarr, engine, await getProgram('exposure'), m.level, zl, cy0, cy1, cx0, cx1), isVessel = /^vessels/.test(FAMILIES[family].kind);
+  const P = { kind: isVessel ? 'vessels' : 'cells', family, model: m.model, level: m.level, box: box_, zA, zB, zA2, zB2, rec: { lo: +rec.lo.toFixed(4), hi: +rec.hi.toFixed(4), gamma: +rec.gamma.toFixed(4) }, src: imageSource(j) };
+  const { blocks, comps, nTiles, nUsed } = await computeSeg(P), use = { length: nUsed }, tiles = { length: nTiles };
   if (tiles.length > use.length) say(`field of view needs ${tiles.length} tiles; the ${use.length} nearest the centre were run - zoom in for full coverage`);
   const sL = L.sp;
   // voxel (level m.level, local) -> Neuroglancer global voxel (level 0 + translation); the radii are the measured 3-D extents
@@ -242,7 +271,7 @@ async function detect() {
     return { type: 'ellipsoid', id: 'd' + i, center: keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)), radii: keys.map((kk) => rad[kk] || 1) }; });
   const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name));
   // the segmentation (voxel labels) is the result; the object centres / extents are an optional, hidden annotation layer
-  k.layers.push(segLayer(isVessel ? 'hwseg vessel segmentation' : 'hwseg cell segmentation', putSeg(m.level, L, off, f, blocks)));
+  k.layers.push(segLayer(isVessel ? 'hwseg vessel segmentation' : 'hwseg cell segmentation', putSeg(P, blocks)));
   if (!isVessel) k.layers.push({ type: 'annotation', name: LAYER, visible: false, annotationColor: '#ff3cc8', source: { url: 'local://annotations', transform: { outputDimensions: dimJSON } }, annotations: ann });
   // the model's exposure becomes Neuroglancer's own window: log-domain lo / hi sliders of the layer shader
   const img = k.layers.find((l) => l.type === 'image' && l.shaderControls !== undefined || l.type === 'image');
@@ -250,7 +279,8 @@ async function detect() {
   k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';        // restoreState drops the displayed dimensions otherwise; the hook needs the x-y plane
   lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);   // reset first: a plain restoreState keeps a broken display plane
   say(`segmentation: ${isVessel ? 'vessel mask' : ann.length + ' cells'} over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
-  window.__hwNg.last = { n: ann.length, model: m.model, level: m.level, planes: nz, tiles: use.length, fov: [box_[3] - box_[2], box_[1] - box_[0]], zspan: ann.length ? [Math.min(...comps.map((c) => c.z)), Math.max(...comps.map((c) => c.z))] : null, meanRz: comps.length ? comps.reduce((a_, c) => a_ + c.rz, 0) / comps.length : 0, edgeZ: comps.filter((c) => c.edgeZ).length };
+  const boxG = [[box_[2] * f + off[2], box_[3] * f + off[2]], [box_[0] * f + off[1], box_[1] * f + off[1]]];
+  window.__hwNg.last = { fovG: [gx0_, gy0_], boxG, covers: boxG[0][0] <= gx0_[0] && boxG[0][1] >= gx0_[1] && boxG[1][0] <= gy0_[0] && boxG[1][1] >= gy0_[1], n: ann.length, model: m.model, level: m.level, planes: nz, tiles: use.length, fov: [box_[3] - box_[2], box_[1] - box_[0]], zspan: ann.length ? [Math.min(...comps.map((c) => c.z)), Math.max(...comps.map((c) => c.z))] : null, meanRz: comps.length ? comps.reduce((a_, c) => a_ + c.rz, 0) / comps.length : 0, edgeZ: comps.filter((c) => c.edgeZ).length };
 }
 const $ = (id) => document.getElementById(id);
 const viewKey = () => { const j = viewer.state.toJSON(); return JSON.stringify([j.position, j.crossSectionScale, j.layout, (j.layers || []).filter((l) => !/^hwseg /.test(l.name)).map((l) => l.name)]); };
@@ -261,6 +291,14 @@ viewer.state.changed.add(() => {                                              //
   if (!$('hw-auto').checked || viewKey() === lastView) return; lastView = viewKey(); clearTimeout(timer); say('view changed: detecting after it settles...'); timer = setTimeout(run, 600);
 });
 window.__hwNg.run = run; window.__hwNg.runModel = (key) => { $('hw-m').value = key; return run(); };
+window.__hwNg.regenSeg = async () => {                                        // drop cached volumes and give every segmentation layer a fresh source so Neuroglancer refetches (and we recompute)
+  const k = viewer.state.toJSON(); let n = 0; const stamp = Date.now().toString(36);
+  for (const l of k.layers || []) if (l.type === 'segmentation') { const u = typeof l.source === 'string' ? l.source : l.source && l.source.url; if (u && /virtual\/seg\//.test(u)) { const nu = u.replace(/(virtual\/seg\/[A-Za-z0-9_-]+)(\.[a-z0-9]+)?/, '$1.' + stamp); if (typeof l.source === 'string') l.source = nu; else l.source.url = nu; n++; } }
+  for (const id of Object.keys(segJobs)) delete segJobs[id]; for (const id of Object.keys(segMetaC)) delete segMetaC[id];
+  if (n) { lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k); say(`regenerating ${n} segmentation layer(s) from their parameters...`); } else say('no segmentation layers in this view');
+  return n;
+};
+window.__hwNg.setSegAlpha = setSegAlpha; window.__hwNg.getSegAlpha = () => segAlpha;
 window.__hwNg.setDepth = (n) => { $('hw-nz').value = String(n); };
 window.__hwNg.setAuto = (on, key) => { if (key) $('hw-m').value = key; $('hw-auto').checked = !!on; if (on) run(); };
 window.__hwNg.ready = true; say('ready');
