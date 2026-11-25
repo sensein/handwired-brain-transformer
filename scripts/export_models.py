@@ -37,4 +37,17 @@ for name, kind in FABLE.items():
     index[name] = dict(file=f"{name}.json", kind=kind, dense=tot, nonzero=nz, heads=nh, layers=len(pr.layers), tile=128,
                        family=name, scale=1, sigma0=None, outputs=list(pr.out), author="fable (hand-written weights)")
     print(f"{name:16s} {len(pr.layers):6d} {nh:5d} {pr.d:3d} {tot:8d} {nz:8d}  (hand-written)")
+
+# hierarchical (hier1) programs: one weight file for every zoom (no level routing, no _xN variants), input = raw log(I+1)
+from hwseg.hier_programs import cells as hier_cells, vessels as hier_vessels
+from hwseg.hier_regions import regions as hier_regions
+for name, mk in (("hier_cells", hier_cells), ("hier_vessels", hier_vessels), ("hier_regions", hier_regions)):
+    p = mk()
+    js = p.to_json()
+    open(f"{OUT}/{name}.json", "w").write(js)
+    tot, nz = p.n_params()
+    index[name] = dict(file=f"{name}.json", kind=p.meta["kind"], format="hier1", hier=True, dense=tot, nonzero=nz, stages=p.n_stages,
+                       ops=len(p.ops), d=p.d, family=name, scale=1, sigma0=None, outputs=list(p.out), input="logI",
+                       author="hand-programmed hierarchical transformer (docs/hierarchical/SPEC.md)")
+    print(f"{name:16s} stages {p.n_stages} ops {len(p.ops):4d} d {p.d} dense {tot} nonzero {nz} json {len(js) / 1024:.0f} kB")
 json.dump(index, open(f"{OUT}/index.json", "w"), indent=1)

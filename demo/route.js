@@ -18,13 +18,21 @@ export const FAMILIES = {
   fable_layers: { kind: 'layers2', invariant: true, minLevel: 5 },
   fable_blobs_v2: { kind: 'blobs', invariant: true, fineOnly: true, maxLevel: 1 },
   fable_vessels_v2: { kind: 'vessels_ms', invariant: true, fineOnly: true, maxLevel: 1 },
+  // hierarchical hand-programmed transformers (docs/hierarchical/SPEC.md): ONE weight file for every zoom. The program reads the
+  // voxel size as an input, normalises contrast itself (rank front end) and selects the feature scale by response, so there is no
+  // level routing, no _xN variant and no exposure program. The level is only a data-cost choice: the coarsest level whose voxel is
+  // no larger than a screen pixel (what is drawn is what is analysed).
+  hier_cells: { kind: 'blobs', invariant: true, hier: true },
+  hier_vessels: { kind: 'vessels_ms', invariant: true, hier: true },
+  hier_regions: { kind: 'regions', invariant: true, hier: true },
 };
 export const MAX_SCALE = { cells: 8, vessels_26dir: 8, vessels_13dir: 8, tissue: 4 };
 
 // Which family the zoom calls for (p = um per screen pixel): tissue >= 8.5 (finest tissue scale first), cells/vessels below.
 // 'layers' is never auto-selected: Playwright runs on real slabs showed it hallucinating (e.g. 91-98% layer I on a LEC
 // view, ~60% L6 + 30% WM on YO), so it is available only by explicit choice and labelled experimental.
-export function familyForZoom(p, stain) {
+export function familyForZoom(p, stain, opts = {}) {
+  if (opts.hier) return ['LEC', 'CD31'].includes(stain) ? (p >= 8.5 ? 'none' : 'hier_vessels') : (p >= 8.5 ? 'hier_regions' : 'hier_cells');
   if (p >= 8.5) return ['LEC', 'CD31'].includes(stain) ? 'none' : 'fable_tissue';   // tissue models are for the nuclear / NeuN stains; LEC is a vessel stain
   return ['LEC', 'CD31'].includes(stain) ? 'fable_vessels_v2' : 'fable_blobs_v2';   // hand-written v2 programs beat the builder ones on real windows
 }
@@ -46,6 +54,7 @@ export function scaledModel(family, p, zarr, scaleSel = 'auto') {
 }
 
 export function scaleLabel(kind, scale, sigmaUm) {
+  if (kind === 'regions') return 'tissue / cortical depth bands / white matter (hierarchical, one program for all zooms)';
   if (kind === 'tissue2') return 'tissue vs background (hand-written)';
   if (kind === 'cortex_wm') return 'cortex vs white matter (geometric, hand-written)';
   if (kind === 'layers2') return 'distance-from-pia bands (experimental)';

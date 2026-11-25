@@ -35,6 +35,9 @@ const MODELS = [
   { key: 'regions', label: 'Tissue outline + cortex / white-matter boundary', stains: ['YO', 'NN'], note: 'yellow tissue outline, cyan cortex / white-matter boundary (whole slab or >= 10 mm views)' },
   // Neurodesk reference models (github.com/neurodesk/webapps): trained networks / a classical detector, run with onnxruntime-web
   // (no WebGPU needed); weights are fetched at run time from the Neurodesk asset store. Level 0, about 1-3 mm fields of view.
+  { key: 'hier_cells', label: 'Cells: hierarchical transformer (any zoom)', stains: ['YO', 'NN'], note: 'hand-programmed hierarchical 3-D transformer: raw log intensity in, rank-normalised in the model, scale chosen by response (experimental)' },
+  { key: 'hier_vessels', label: 'Vessels: hierarchical transformer (any zoom)', stains: ['LEC', 'CD31'], note: 'hierarchical tube detector over several calibres (experimental)' },
+  { key: 'hier_regions', label: 'Tissue / depth bands / white matter: hierarchical (any zoom)', stains: ['YO', 'NN'], note: 'tissue, cortical depth bands and white matter from one hierarchical program (experimental; fragile on YO)' },
   { key: 'nd_cellpose', label: 'Reference: Cellpose 3 nuclei (Neurodesk)', stains: ['YO', 'NN'], ref: true, diam: true, note: 'Cellpose nuclei, 2-D per plane, planes resampled so the declared diameter spans 17 px, linked across z; 26 MB weights (BSD-3; training data partly CC-BY-NC)' },
   { key: 'nd_stardist', label: 'Reference: StarDist 2D fluorescence (Neurodesk)', stains: ['YO', 'NN'], ref: true, diam: true, note: 'StarDist 2D_versatile_fluo, 2-D per plane, resampled so the declared diameter spans 16 px, polygon NMS, linked across z; 6 MB weights (BSD-3)' },
   { key: 'nd_cellfinder', label: 'Reference: cellfinder candidates (Neurodesk port)', stains: ['YO', 'NN'], ref: true, diam: true, note: 'cellfinder 1.10.1 classical 3-D detection (no weights; BSD-3): candidate centres drawn as spheres of the declared diameter' },

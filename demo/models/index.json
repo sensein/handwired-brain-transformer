@@ -348,5 +348,117 @@
    "bg"
   ],
   "author": "fable (hand-written weights)"
+ },
+ "hier_cells": {
+  "file": "hier_cells.json",
+  "kind": "blobs",
+  "format": "hier1",
+  "hier": true,
+  "dense": 178747,
+  "nonzero": 4761,
+  "stages": 4,
+  "ops": 282,
+  "d": [
+   41,
+   37,
+   37,
+   37
+  ],
+  "family": "hier_cells",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "seg",
+   "score",
+   "u",
+   "nucleus",
+   "soma",
+   "cluster",
+   "ok"
+  ],
+  "input": "logI",
+  "author": "hand-programmed hierarchical transformer (docs/hierarchical/SPEC.md)"
+ },
+ "hier_vessels": {
+  "file": "hier_vessels.json",
+  "kind": "vessels_ms",
+  "format": "hier1",
+  "hier": true,
+  "dense": 196141,
+  "nonzero": 4949,
+  "stages": 4,
+  "ops": 306,
+  "d": [
+   44,
+   40,
+   40,
+   40
+  ],
+  "family": "hier_vessels",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "seg",
+   "score",
+   "u",
+   "capillary",
+   "vessel",
+   "large",
+   "ok"
+  ],
+  "input": "logI",
+  "author": "hand-programmed hierarchical transformer (docs/hierarchical/SPEC.md)"
+ },
+ "hier_regions": {
+  "file": "hier_regions.json",
+  "kind": "regions",
+  "format": "hier1",
+  "hier": true,
+  "dense": 555884,
+  "nonzero": 3364,
+  "stages": 5,
+  "ops": 165,
+  "d": [
+   57,
+   3,
+   7,
+   1,
+   1
+  ],
+  "family": "hier_regions",
+  "scale": 1,
+  "sigma0": null,
+  "outputs": [
+   "depth",
+   "f0",
+   "potential",
+   "tissue",
+   "bg",
+   "cortex",
+   "wm",
+   "L1",
+   "L2",
+   "L3",
+   "L4",
+   "L5",
+   "L6",
+   "WM",
+   "u",
+   "ok",
+   "T",
+   "bim",
+   "eO",
+   "eW",
+   "mO",
+   "mI",
+   "mW",
+   "O",
+   "I",
+   "W",
+   "Pa",
+   "Pb"
+  ],
+  "input": "logI",
+  "author": "hand-programmed hierarchical transformer (docs/hierarchical/SPEC.md)"
  }
 }
