@@ -21,7 +21,7 @@ const errs = []; page.on('console', (m) => { if (m.type() === 'error' || m.type(
 const stat = () => page.evaluate(() => [...document.querySelectorAll('.neuroglancer-status-message')].map((e) => e.textContent.trim().slice(0, 160)));
 console.log('probe:', JSON.stringify(await page.evaluate(() => window.__hwNg.probe())));
 await page.evaluate(() => window.__hwNg.setAuto(true, 'regions'));
-const waitRun = async (tag) => { const t0 = Date.now(); let st = ''; while (Date.now() - t0 < 330000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/segments|error|zoom in/.test(st)) break; } console.log(tag, st, '| status msgs:', JSON.stringify(await stat())); };
+const waitRun = async (tag) => { const t0 = Date.now(); let st = ''; while (Date.now() - t0 < 330000) { await page.waitForTimeout(2000); const ev = await page.evaluate(() => window.__hwNg.events.map((e) => e.msg)); st = ev.filter((m) => /segments|error:|zoom in/.test(m)).pop() || ''; if (st && ev.length > (waitRun.n || 0)) { waitRun.n = ev.length; break; } } console.log(tag, st, '| status msgs:', JSON.stringify(await stat())); };
 await waitRun('run1:');
 for (let k = 2; k <= 3; k++) {   // pan: the continuous mode re-runs after the view settles
   await page.mouse.move(400, 400); await page.mouse.down(); await page.mouse.move(400 - 120 * k, 400, { steps: 8 }); await page.mouse.up();   // pan with the mouse like a user
