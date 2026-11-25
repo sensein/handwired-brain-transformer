@@ -3,7 +3,7 @@
 // detections back as a Neuroglancer annotation layer. Triggered by a button, or automatically (debounced) as you navigate.
 import { parseProgram, GPUEngine, haloFor } from './engine.js';
 import { Zarr, Slab, clamp } from './zarr.js';
-import { segRegion, segVolume, adjustLogVol, recommendExposure, IDENT } from './seg.js';
+import { segRegion, segVolume, labelVolume, adjustLogVol, recommendExposure, IDENT } from './seg.js';
 import { scaledModel, FAMILIES } from './route.js';
 
 const LAYER = 'hwseg detections';
@@ -24,10 +24,32 @@ async function serveVirtual(idsStr, path) {
   for (let i = 0; i < v.length; i++) out[i] = Math.max(0, Math.min(65535, Math.round(Math.exp(v[i]) - 1)));
   return { type: 'application/octet-stream', body: out.buffer };
 }
+
+// ---- segmentation volume: model output as a Neuroglancer `precomputed` segmentation layer, served by the service worker from memory
+const segStore = {};
+function serveSeg(id, path) {
+  const S = segStore[id]; if (!S) return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) };
+  if (path === 'info') return { type: 'application/json', body: new TextEncoder().encode(JSON.stringify({ '@type': 'neuroglancer_multiscale_volume', type: 'segmentation', data_type: 'uint32', num_channels: 1,
+    scales: [{ key: '0', size: S.size, resolution: S.res, chunk_sizes: [[64, 64, 16]], encoding: 'raw', voxel_offset: S.vo }] })).buffer };
+  const m = path.match(/^0\/(\d+)-(\d+)_(\d+)-(\d+)_(\d+)-(\d+)$/); if (!m) return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) };
+  const [x0, x1, y0, y1, z0, z1] = m.slice(1).map(Number), W = x1 - x0, H = y1 - y0, out = new Uint32Array(W * H * (z1 - z0));    // x fastest
+  for (const b of S.blocks) {                                                    // blocks hold local voxel indices of the level
+    const gx0 = Math.max(x0, b.x0 + S.vo[0]), gx1 = Math.min(x1, b.x1 + S.vo[0]), gy0 = Math.max(y0, b.y0 + S.vo[1]), gy1 = Math.min(y1, b.y1 + S.vo[1]), gz0 = Math.max(z0, b.z0 + S.vo[2]), gz1 = Math.min(z1, b.z1 + S.vo[2]);
+    if (gx0 >= gx1 || gy0 >= gy1 || gz0 >= gz1) continue; const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
+    for (let z = gz0; z < gz1; z++) for (let y = gy0; y < gy1; y++) { let o = ((z - z0) * H + (y - y0)) * W + (gx0 - x0), q = ((z - S.vo[2] - b.z0) * bh + (y - S.vo[1] - b.y0)) * bw + (gx0 - S.vo[0] - b.x0); for (let x = gx0; x < gx1; x++) out[o++] = b.lab[q++]; }
+  }
+  return { type: 'application/octet-stream', body: out.buffer };
+}
+function putSeg(level, L, off, f, blocks) {                                    // register a segmentation and return its layer source URL
+  const id = Date.now().toString(36); const keep = Object.keys(segStore); if (keep.length > 3) delete segStore[keep[0]];
+  segStore[id] = { size: [L.shape[2], L.shape[1], L.shape[0]], res: [L.sp[2] * 1000, L.sp[1] * 1000, L.sp[0] * 1000], vo: [Math.round(off[2] / f), Math.round(off[1] / f), Math.round(off[0] / f)], blocks };
+  return 'precomputed://' + new URL('../virtual/seg/' + id, import.meta.url).href;
+}
+const segLayer = (name, source, extra = {}) => ({ type: 'segmentation', name, source, selectedAlpha: 0.55, notSelectedAlpha: 0, ...extra });
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', async (ev) => {
     const m = ev.data; if (!m || m.kind !== 'virtual') return; const port = ev.ports[0];
-    try { const r = await serveVirtual(m.ids, m.path); port.postMessage(r, [r.body]); }
+    try { const r = m.which === 'seg' ? serveSeg(m.ids, m.path) : await serveVirtual(m.ids, m.path); port.postMessage(r, [r.body]); }
     catch (e) { port.postMessage({ status: 500, type: 'text/plain', body: new TextEncoder().encode(String(e)).buffer }); }
   });
   navigator.serviceWorker.register(new URL('sw.js', import.meta.url).href).then(async () => {
@@ -84,10 +106,10 @@ function components(seg, dims, ox, oy, w, h) {
   const mask = new Uint8Array(w * h), seen = new Uint8Array(w * h), out = [];
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) mask[y * w + x] = seg[(oy + y) * dims[2] + ox + x] > 0.5 ? 1 : 0;
   for (let i = 0; i < w * h; i++) if (mask[i] && !seen[i]) {
-    let n = 0, sx = 0, sy = 0; const st = [i]; seen[i] = 1;
-    while (st.length) { const j = st.pop(), x = j % w, y = (j / w) | 0; n++; sx += x; sy += y;
+    let n = 0, sx = 0, sy = 0; const st = [i], pix = []; seen[i] = 1;
+    while (st.length) { const j = st.pop(), x = j % w, y = (j / w) | 0; n++; sx += x; sy += y; pix.push(j);
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue; const k = yy * w + xx; if (mask[k] && !seen[k]) { seen[k] = 1; st.push(k); } } }
-    if (n >= 3) out.push({ x: sx / n, y: sy / n, r: Math.sqrt(n / Math.PI) });
+    if (n >= 3) out.push({ x: sx / n, y: sy / n, r: Math.sqrt(n / Math.PI), pix });
   }
   return out;
 }
@@ -97,7 +119,7 @@ function components(seg, dims, ox, oy, w, h) {
 // 2-D components first and components in adjacent planes are linked when their centres overlap. A track ends where its area dips
 // below 60% of its peak and rises again (two cells stacked in z). Object centre/z extent are area-weighted over the track;
 // the in-plane radius comes from the largest cross-section, the z radius from the area-weighted z spread (r = sqrt(5 var)).
-function components3(seg, dims, ox, oy, w, h, nz) {
+function components3(seg, dims, ox, oy, w, h, nz, idBase = 0) {
   const plane = dims[1] * dims[2], tracks = []; let open = [];
   for (let z = 0; z < nz; z++) {
     const cs = components(seg.subarray(z * plane, (z + 1) * plane), dims, ox, oy, w, h), next = [], taken = new Set();
@@ -109,14 +131,15 @@ function components3(seg, dims, ox, oy, w, h, nz) {
     for (let ci = 0; ci < cs.length; ci++) if (!cDone.has(ci)) { const t = { pl: [{ ...cs[ci], z }] }; tracks.push(t); next.push(t); }
     open = next;
   }
-  const out = [];
+  const out = [], lab = new Uint32Array(nz * h * w);                           // per-voxel instance ids (the segmentation)
+  tracks.forEach((t, ti) => { for (const p of t.pl) { const base = p.z * h * w; for (const q of p.pix) lab[base + q] = idBase + ti + 1; } });
   for (const t of tracks) {
     let A = 0, sx = 0, sy = 0, sz = 0, qz = 0, rmax = 0, nv = 0;
     for (const p of t.pl) { const a_ = p.r * p.r * Math.PI; A += a_; sx += a_ * p.x; sy += a_ * p.y; sz += a_ * p.z; qz += a_ * p.z * p.z; rmax = Math.max(rmax, p.r); nv += a_; }
     const mz = sz / A, vz = Math.max(qz / A - mz * mz, 0);
     out.push({ x: sx / A, y: sy / A, z: mz, rx: rmax, ry: rmax, rz: Math.sqrt(5 * vz + 0.25), vox: nv, edgeZ: t.pl[0].z === 0 || t.pl[t.pl.length - 1].z === nz - 1, planes: t.pl.length });
   }
-  return out;
+  return { objs: out, n: tracks.length, lab };
 }
 
 // Marching squares on a binary mask -> line segments (in mask pixel coordinates). Neuroglancer annotations have no region type,
@@ -157,6 +180,8 @@ async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name));
   const LINE_SHADER = 'void main() { setColor(defaultColor()); setLineWidth(1.5); setEndpointMarkerSize(0.0); setEndpointMarkerBorderWidth(0.0); }';   // thin lines, no endpoint markers
   for (const [name, col, ann] of layers) k.layers.push({ type: 'annotation', name, annotationColor: col, shader: LINE_SHADER, source: { url: 'local://annotations', transform: { outputDimensions: Object.fromEntries(keys.map((kk) => [kk, d[kk]])) } }, annotations: ann });
+  const lab = new Uint32Array(w * h); for (let q = 0; q < w * h; q++) lab[q] = tis[q] ? (wm[q] ? 2 : 1) : 0;        // 1 = gray matter (tissue, not white matter), 2 = white matter; only the displayed plane is computed
+  k.layers.splice(1, 0, segLayer('hwseg tissue / white-matter segmentation', putSeg(level, L, off, f, [{ x0: box_[2], x1: box_[3], y0: box_[0], y1: box_[1], z0: zl, z1: zl + 1, lab }]), { segmentColors: { 1: '#ffa028', 2: '#3c8cff' } }));
   const img = k.layers.find((l) => l.type === 'image');
   if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
   k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';
@@ -193,12 +218,18 @@ async function detect() {
   // the whole field of view is covered by overlapping tiles (core + halo, one GPU pass each over the whole z slab); a detection belongs to the tile whose core holds its centre
   const tiles = []; for (let ty = box_[0]; ty < box_[1]; ty += core) for (let tx = box_[2]; tx < box_[3]; tx += core) tiles.push([ty, Math.min(ty + core, box_[1]), tx, Math.min(tx + core, box_[3])]);
   tiles.sort((p, q) => Math.hypot((p[0] + p[1]) / 2 - cy, (p[2] + p[3]) / 2 - cx) - Math.hypot((q[0] + q[1]) / 2 - cy, (q[2] + q[3]) / 2 - cx));   // centre first
-  const MAXT = 100, use = tiles.slice(0, MAXT), comps = [];
+  const MAXT = 100, use = tiles.slice(0, MAXT), comps = [], blocks = [], isVessel = /^vessels/.test(FAMILIES[family].kind); let idBase = 0;
   for (let ti = 0; ti < use.length; ti++) {
     const [cy_0, cy_1, cx_0, cx_1] = use[ti], Y0 = Math.max(0, cy_0 - hal), Y1 = Math.min(L.shape[1], cy_1 + hal), X0 = Math.max(0, cx_0 - hal), X1 = Math.min(L.shape[2], cx_1 + hal);
     say(`${m.model}: tile ${ti + 1}/${use.length} (${X1 - X0}x${Y1 - Y0}x${nz} planes, level ${m.level}) on WebGPU...`);
     const r = await segVolume(zarr, engine, prog, m.level, zA2, zB2, Y0, Y1, X0, X1, (v) => adjustLogVol(v, rec.lo, rec.hi, { b: 0, c: 1, g: rec.gamma }), { halo: false });
-    for (const c of components3(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h, r.nz)) { const gy_ = Y0 + c.y, gx_ = X0 + c.x; const gz_ = zA2 + c.z; if (gy_ >= cy_0 && gy_ < cy_1 && gx_ >= cx_0 && gx_ < cx_1 && gz_ >= zA - 0.5 && gz_ < zB - 0.5) comps.push({ ...c, y: gy_, x: gx_, z: gz_ }); }
+    const lx0 = cx_0 - X0, lx1 = cx_1 - X0, ly0 = cy_0 - Y0, ly1 = cy_1 - Y0, cw = lx1 - lx0, chh = ly1 - ly0, plane = r.h * r.w; let full;
+    if (isVessel) full = labelVolume(FAMILIES[family].kind, r);                   // class labels from the program's own channels (1 = capillary, 2 = vessel, ...)
+    else { const t3 = components3(r.out.seg, r.dims, r.ox, r.oy, r.w, r.h, r.nz, idBase); idBase += t3.n; full = t3.lab;   // one id per linked cell
+      for (const c of t3.objs) { const gy_ = Y0 + c.y, gx_ = X0 + c.x, gz_ = zA2 + c.z; if (gy_ >= cy_0 && gy_ < cy_1 && gx_ >= cx_0 && gx_ < cx_1 && gz_ >= zA - 0.5 && gz_ < zB - 0.5) comps.push({ ...c, y: gy_, x: gx_, z: gz_ }); } }
+    const lab = new Uint32Array(cw * chh * r.nz);                                  // keep only this tile's core: tiles abut without overlap
+    for (let z = 0; z < r.nz; z++) for (let y = 0; y < chh; y++) { const src = z * plane + (ly0 + y) * r.w + lx0, dst = (z * chh + y) * cw; for (let x = 0; x < cw; x++) lab[dst + x] = full[src + x]; }
+    blocks.push({ x0: cx_0, x1: cx_1, y0: cy_0, y1: cy_1, z0: zA2, z1: zA2 + r.nz, lab });
   }
   if (tiles.length > use.length) say(`field of view needs ${tiles.length} tiles; the ${use.length} nearest the centre were run - zoom in for full coverage`);
   const sL = L.sp;
@@ -209,18 +240,20 @@ async function detect() {
   const ann = comps.map((c, i) => { const g = { z: (c.z + 0.5) * f + off[0], y: (c.y + 0.5) * f + off[1], x: (c.x + 0.5) * f + off[2] };
     const rad = { z: Math.max(1, c.rz * sL[0] / L0.sp[0]), y: Math.max(1, c.ry * sL[1] / L0.sp[1]), x: Math.max(1, c.rx * sL[2] / L0.sp[2]) };
     return { type: 'ellipsoid', id: 'd' + i, center: keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)), radii: keys.map((kk) => rad[kk] || 1) }; });
-  const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => l.name !== LAYER && !/^hwseg (tissue|gray|cortex)/.test(l.name));
-  k.layers.push({ type: 'annotation', name: LAYER, annotationColor: '#ff3cc8', source: { url: 'local://annotations', transform: { outputDimensions: dimJSON } }, annotations: ann });
+  const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name));
+  // the segmentation (voxel labels) is the result; the object centres / extents are an optional, hidden annotation layer
+  k.layers.push(segLayer(isVessel ? 'hwseg vessel segmentation' : 'hwseg cell segmentation', putSeg(m.level, L, off, f, blocks)));
+  if (!isVessel) k.layers.push({ type: 'annotation', name: LAYER, visible: false, annotationColor: '#ff3cc8', source: { url: 'local://annotations', transform: { outputDimensions: dimJSON } }, annotations: ann });
   // the model's exposure becomes Neuroglancer's own window: log-domain lo / hi sliders of the layer shader
   const img = k.layers.find((l) => l.type === 'image' && l.shaderControls !== undefined || l.type === 'image');
   if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
   k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy';        // restoreState drops the displayed dimensions otherwise; the hook needs the x-y plane
   lastView = viewKey(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);   // reset first: a plain restoreState keeps a broken display plane
-  say(`${ann.length} 3-D detections over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
+  say(`segmentation: ${isVessel ? 'vessel mask' : ann.length + ' cells'} over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
   window.__hwNg.last = { n: ann.length, model: m.model, level: m.level, planes: nz, tiles: use.length, fov: [box_[3] - box_[2], box_[1] - box_[0]], zspan: ann.length ? [Math.min(...comps.map((c) => c.z)), Math.max(...comps.map((c) => c.z))] : null, meanRz: comps.length ? comps.reduce((a_, c) => a_ + c.rz, 0) / comps.length : 0, edgeZ: comps.filter((c) => c.edgeZ).length };
 }
 const $ = (id) => document.getElementById(id);
-const viewKey = () => { const j = viewer.state.toJSON(); return JSON.stringify([j.position, j.crossSectionScale, j.layout, (j.layers || []).filter((l) => l.name !== LAYER).map((l) => l.name)]); };
+const viewKey = () => { const j = viewer.state.toJSON(); return JSON.stringify([j.position, j.crossSectionScale, j.layout, (j.layers || []).filter((l) => !/^hwseg /.test(l.name)).map((l) => l.name)]); };
 let lastView = viewKey(), timer = null, busy = Promise.resolve();
 const run = () => { window.__hwNg.busy = true; busy = busy.then(() => detect()).catch((e) => say('error: ' + e.message)).finally(() => { window.__hwNg.busy = false; }); return busy; };
 $('hw-run').onclick = run;

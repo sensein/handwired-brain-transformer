@@ -66,7 +66,7 @@
     <button id="copy">Copy link to this Neuroglancer state</button>
     <dl id="info"></dl>
     <p class="legend note" id="legend"></p>
-    <p class="note">Contrast, brightness and gamma are Neuroglancer's own layer controls (the shader panel on the right: lo / hi / contrast / brightness / gamma); the model's recommended window is applied after each run. Model results appear as annotation layers you can toggle, edit and share.</p>
+    <p class="note">Contrast, brightness and gamma are Neuroglancer's own layer controls (the shader panel on the right: lo / hi / contrast / brightness / gamma); the model's recommended window is applied after each run. Model results are segmentation layers (voxel labels computed in your browser and served to Neuroglancer from memory): cells get one id each, vessels class labels, tissue / white matter two classes. Cell centres and extents are a hidden annotation layer you can switch on.</p>
     <p class="note"><a href="lab.html">Python lab</a> · <a href="viewer.html">2D viewer (legacy)</a> · <a href="https://github.com/sensein/handwired-brain-transformer">source</a></p>
   </aside>
   <main><iframe id="ng" title="Neuroglancer" allow="fullscreen"></iframe></main>

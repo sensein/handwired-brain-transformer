@@ -186,15 +186,16 @@ Live: https://sensein.github.io/handwired-brain-transformer/ (GitHub Pages, bran
 
 The front page (`index.html`) is a Neuroglancer view embedded in a thin shell: a sidebar selects stain, sample, acquisition,
 whole slab vs one strip, and the model; Neuroglancer's own shader panel gives lo / hi / contrast / brightness / gamma.
-"Run on this view" streams the chunks of the current field of view (tiled into overlapping 384-voxel GPU passes, up to 100 tiles, centre first, so the whole view is covered), runs the model on your GPU (WebGPU) and adds the result as
-Neuroglancer annotation layers (cells, vessels, tissue outline, cortex/white-matter boundary). The whole slab is a *virtual
+"Run on this view" streams the chunks of the current field of view (tiled into overlapping 384-voxel GPU passes, up to 100 tiles, centre first, so the whole view is covered), runs the model on your GPU (WebGPU) and adds the result as a Neuroglancer *segmentation* layer (voxel labels served from memory by the service worker as a `precomputed` volume:
+one id per cell, class labels for vessels, gray / white matter for the region programs; the region programs label only the displayed plane)
+plus hidden annotation layers (cell centres / extents, tissue outline and cortex/white-matter contours). The whole slab is a *virtual
 precomputed volume* generated in the browser by our stitcher and served to Neuroglancer by a service worker (`sw.js`), so
 adjacent strips are cross-faded into one continuous volume. The old stand-alone 2D viewer remains at `viewer.html` (legacy;
 it documents the debounced FOV pipeline, depth keys and 3D renderer below); the slab gallery was removed.
 Cell and vessel detection in the Neuroglancer view is 3-D: the "Depth" selector (default 9 planes; 1 = the old single-plane mode) runs the
 model on a z slab (plus margin planes so objects cut by the slab edge keep their z extent), splits every plane into 2-D blobs and links blobs in adjacent planes into objects (a 3-D connected-component pass merged
 touching cells into tall ellipsoids and was dropped; a track also ends where its area dips below 60% of its peak and rises again),
-and draws each object as an ellipsoid with a measured in-plane radius (largest cross-section) and z radius (area-weighted spread, r = sqrt(5 var)). A detection belongs
+and the linked blobs are the cell labels; each object also gets an (optional, hidden) ellipsoid with a measured in-plane radius (largest cross-section) and z radius (area-weighted spread, r = sqrt(5 var)). A detection belongs
 to the slab if its centre lies in it; tile cores own detections in x-y. The attention itself already spans z, but with a thin
 radius (cells ~5 um, vessels 2.5-6 um) so z context is a few planes; tissue and cortex/white-matter stay 2-D contours.
 Cortex / white-matter and layer programs are only routed at pyramid level >= 5 (coarse): the cortex boundary is a fixed
