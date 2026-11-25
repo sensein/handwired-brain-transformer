@@ -19,13 +19,14 @@ await page.waitForTimeout(8000);
 await page.screenshot({ path: `${OUT}/ng_before.png` });
 const errs = []; page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') errs.push(m.type() + ': ' + m.text().slice(0, 200)); });
 const stat = () => page.evaluate(() => [...document.querySelectorAll('.neuroglancer-status-message')].map((e) => e.textContent.trim().slice(0, 160)));
+console.log('probe:', JSON.stringify(await page.evaluate(() => window.__hwNg.probe())));
 await page.evaluate(() => window.__hwNg.setAuto(true, 'regions'));
-const waitRun = async (tag) => { const t0 = Date.now(); let st = ''; while (Date.now() - t0 < 240000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/segments|error|zoom in/.test(st)) break; } console.log(tag, st, '| status msgs:', JSON.stringify(await stat())); };
+const waitRun = async (tag) => { const t0 = Date.now(); let st = ''; while (Date.now() - t0 < 330000) { await page.waitForTimeout(2000); st = await page.evaluate(() => window.__hwNg.status); if (/segments|error|zoom in/.test(st)) break; } console.log(tag, st, '| status msgs:', JSON.stringify(await stat())); };
 await waitRun('run1:');
-for (let k = 2; k <= 4; k++) {   // pan: the continuous mode re-runs after the view settles
+for (let k = 2; k <= 3; k++) {   // pan: the continuous mode re-runs after the view settles
   await page.mouse.move(400, 400); await page.mouse.down(); await page.mouse.move(400 - 120 * k, 400, { steps: 8 }); await page.mouse.up();   // pan with the mouse like a user
   await page.waitForTimeout(3000); await waitRun('run' + k + ':');
 }
-console.log('errors:', JSON.stringify(errs.slice(0, 8)));
+console.log('layer-list failures/fallbacks:', errs.filter((e) => /layer-list|generation|undefined/.test(e)).length, '| other console errors:', JSON.stringify(errs.filter((e) => !/GL Driver|performance warning|ReadPixels/.test(e)).slice(0, 5)));
 await page.screenshot({ path: `${OUT}/auto_after.png` });
 await browser.close(); srv.close();

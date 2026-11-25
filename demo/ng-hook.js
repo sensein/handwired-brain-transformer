@@ -27,12 +27,13 @@ async function serveVirtual(idsStr, path) {
 
 // ---- segmentation volume: model output as a Neuroglancer `precomputed` segmentation layer, served by the service worker from memory
 let segAlpha = 0.55;
+const pyApproved = new Set(), pyPending = [];                                   // Python-carrying segmentations: approved ids, and ones waiting for the person's approval
 const segStore = {}, segJobs = {}, segMetaC = {};
 // The layer's source URL carries the run parameters (model, level, box, z slab, exposure, image source) as the volume id, so a
 // shared link regenerates the segmentation on demand in whoever opens it; nothing has to be uploaded or stored.
 const b64e = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const b64d = (t) => JSON.parse(decodeURIComponent(escape(atob(t.replace(/-/g, '+').replace(/_/g, '/')))));
-async function segMeta(P) { const src = await openSource(P.src), L = src.z.levels[P.level], f = 2 ** P.level;
+async function segMeta(P) { const lvl = P.kind === 'py' ? P.view.level : P.level, src = await openSource(P.kind === 'py' ? P.view.src : P.src), L = src.z.levels[lvl], f = 2 ** lvl;
   return { size: [L.shape[2], L.shape[1], L.shape[0]], res: [L.sp[2] * 1000, L.sp[1] * 1000, L.sp[0] * 1000], vo: [Math.round(src.off[2] / f), Math.round(src.off[1] / f), Math.round(src.off[0] / f)] }; }
 async function serveSeg(idFull, path) {
   const id = idFull.split('.')[0]; let P; try { P = b64d(id); } catch (e) { return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) }; }
@@ -41,6 +42,11 @@ async function serveSeg(idFull, path) {
     scales: [{ key: '0', size: S.size, resolution: S.res, chunk_sizes: [[64, 64, 16]], encoding: 'raw', voxel_offset: S.vo }] })).buffer };
   const m = path.match(/^0\/(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)$/); if (!m) return { status: 404, type: 'text/plain', body: new ArrayBuffer(0) };
   const [x0, x1, y0, y1, z0, z1] = m.slice(1).map(Number), W = x1 - x0, H = y1 - y0, out = new Uint32Array(W * H * (z1 - z0));    // x fastest
+  if (P.kind === 'py' && !pyApproved.has(id)) {                                 // a link carrying Python code: never run it without the person's say-so
+    if (!pyPending.some((p) => p.id === id)) { pyPending.push({ id, name: P.name, code: P.code }); say('this link contains Python code for a segmentation layer: review and approve it to run it'); }
+    return { type: 'application/octet-stream', body: out.buffer };
+  }
+  if (P.kind === 'py' && !segJobs[id]) say('python: seg request ' + path + ' -> starting regeneration');
   const blocks = await (segJobs[id] ||= computeSeg(P).then((r) => r.blocks));      // regenerated on first request when this page did not compute it
   for (const b of blocks) {                                                      // blocks hold local voxel indices of the level
     const gx0 = Math.max(x0, b.x0 + S.vo[0]), gx1 = Math.min(x1, b.x1 + S.vo[0]), gy0 = Math.max(y0, b.y0 + S.vo[1]), gy1 = Math.min(y1, b.y1 + S.vo[1]), gz0 = Math.max(z0, b.z0 + S.vo[2]), gz1 = Math.min(z1, b.z1 + S.vo[2]);
@@ -59,11 +65,11 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', async (ev) => {
     const m = ev.data; if (!m || m.kind !== 'virtual') return; const port = ev.ports[0];
     try { const r = m.which === 'seg' ? await serveSeg(m.ids, m.path) : await serveVirtual(m.ids, m.path); port.postMessage(r, [r.body]); }
-    catch (e) { port.postMessage({ status: 500, type: 'text/plain', body: new TextEncoder().encode(String(e)).buffer }); }
+    catch (e) { say('virtual volume request failed: ' + String(e.message || e).slice(0, 300)); port.postMessage({ status: 500, type: 'text/plain', body: new TextEncoder().encode(String(e)).buffer }); }
   });
   navigator.serviceWorker.register(new URL('sw.js', import.meta.url).href).then(async () => {
     await navigator.serviceWorker.ready;   // a shared link opened directly: the first load is not controlled yet, so reload once
-    if (!navigator.serviceWorker.controller && /virtual\/slab/.test(location.href) && !sessionStorage.getItem('hw-sw-reload')) { sessionStorage.setItem('hw-sw-reload', '1'); location.reload(); }
+    if (!navigator.serviceWorker.controller && /virtual\/(slab|seg)/.test(location.href) && !sessionStorage.getItem('hw-sw-reload')) { sessionStorage.setItem('hw-sw-reload', '1'); location.reload(); }
   }).catch(() => {});
 }
 const el = (t, css, html) => { const e = document.createElement(t); if (css) e.style.cssText = css; if (html) e.innerHTML = html; return e; };
@@ -86,12 +92,22 @@ const getProgram = async (k) => programs[k] ||= parseProgram(await (await fetch(
 const sources = {};
 
 // ---- read the view: field of view recovered from the data coordinates Neuroglancer reports under the panel corners
+// Field of view from the view's own state: position (centre), crossSectionScale (voxels of the first displayed dimension per CSS pixel) and the
+// panel size. No mouse events are needed (the mouse-hover probe it replaces was flaky: synthetic events did not always update the mouse position).
 async function probeFov() {
   const panel = [...viewer.display.panels].find((p) => p.element && p.element.getBoundingClientRect().width > 100); if (!panel) throw new Error('no cross-section panel');
-  const el_ = panel.element, r = el_.getBoundingClientRect();
+  const r = panel.element.getBoundingClientRect(), j = viewer.state.toJSON(), d = j.dimensions || {}, keys = Object.keys(d), s = j.crossSectionScale, pos = j.position;
+  const ix = keys.indexOf('x'), iy = keys.indexOf('y'); const dispOk = Array.isArray(j.displayDimensions) ? j.displayDimensions.slice(0, 2).join() === 'x,y' : true;
+  if (pos && s > 0 && ix >= 0 && iy >= 0 && dispOk && keys.length === pos.length) {
+    const ex = s * r.width, ey = s * (d.x[0] / d.y[0]) * r.height;                 // extents in voxels of x and y (physical scale per pixel is isotropic)
+    const tl = pos.slice(), br = pos.slice(); tl[ix] = pos[ix] - ex / 2; br[ix] = pos[ix] + ex / 2; tl[iy] = pos[iy] - ey / 2; br[iy] = pos[iy] + ey / 2;
+    return { tl, br, c: pos.slice(), w: r.width, h: r.height };
+  }
+  // fallback: hover just inside the panel corners and extrapolate
+  const el_ = panel.element;
   const at = async (fx, fy) => { el_.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + fx * r.width, clientY: r.top + fy * r.height, bubbles: true })); await sleep(120); return Array.from(viewer.mouseState.position); };
-  const c = await at(0.5, 0.5), a = await at(0.02, 0.02), b = await at(0.98, 0.98);   // hover just inside the edges, then extrapolate to the true corners
-  const tl = c.map((v, i) => v - (v - a[i]) / 0.96), br = c.map((v, i) => v + (b[i] - v) / 0.96);   // the probe is 0.48 of the width from the centre; the corner is 0.5
+  const c = await at(0.5, 0.5), a = await at(0.02, 0.02), b = await at(0.98, 0.98);
+  const tl = c.map((v, i) => v - (v - a[i]) / 0.96), br = c.map((v, i) => v + (b[i] - v) / 0.96);
   return { tl, br, c, w: r.width, h: r.height };
 }
 function imageSource(j) {
@@ -101,8 +117,9 @@ function imageSource(j) {
   const ids = [...new Set([...txt.matchAll(/dandiarchive\.s3\.amazonaws\.com\/zarr\/([0-9a-f-]{36})/g)].map((m) => m[1]))];
   if (!ids.length) throw new Error('image layer is not a DANDI zarr source'); return { ids, virtual: false, seams: false };
 }
+const openedOnce = new Set();
 async function openSource({ ids, virtual, seams }) {
-  say(`opening ${ids.length > 1 || virtual ? `stitched slab (${ids.length} strips)` : 'strip'}...`);
+  const okey = ids.join('+') + (virtual ? 'v' : ''); if (!openedOnce.has(okey)) { openedOnce.add(okey); say(`opening ${ids.length > 1 || virtual ? `stitched slab (${ids.length} strips)` : 'strip'}...`); }   // not on every chunk request
   const z = virtual ? await getSlab(ids, seams) : (ids.length > 1 ? await getSlab(ids, false) : (sources[ids[0]] ||= await (async () => { const q = new Zarr(ids[0]); await q.init(); return q; })()));
   // zarr sources: Neuroglancer places each zarr at its OME translation (global voxel = local index + translation / voxel size);
   // the virtual volume's own grid starts at 0.
@@ -171,20 +188,114 @@ function setSegAlpha(a) {                                                      /
   for (const ml of viewer.layerManager.managedLayers) { const ds = ml.layer && ml.layer.displayState; if (ds && ds.selectedAlpha) { ds.selectedAlpha.value = segAlpha; n++; } }
   return n;
 }
-// Update only our own layers (and the image window) instead of rewriting the whole viewer state: a full reset + restoreState after every run
-// broke the layout/display state (Neuroglancer: "Cannot read properties of undefined (reading 'generation')") in continuous mode.
+// Neuroglancer reads every layer's hover (selection) state whenever the mouse is active over the view; a layer that was just created has none yet
+// ('Cannot read properties of undefined (reading 'generation')'). Deactivate the mouse state before changing layers (it reactivates on the next move).
+function quietMouse() { try { viewer.mouseState.setActive(false); } catch (e) { /* older builds */ } }
+// Layer-list update without touching view, layout or display dimensions: rebuild only the layer list through the layer specification
+// (viewer.state.restoreState also re-restores layout/position and was the source of the broken-state errors).
+function setLayerList(mutate) {
+  quietMouse();
+  const cur = JSON.parse(JSON.stringify(viewer.state.toJSON().layers || []));
+  viewer.layerSpecification.restoreState(mutate(cur) || cur);
+}
 function applyHwLayers(specs, rec) {
   try {
-    const lm = viewer.layerManager;
-    for (const ml of [...lm.managedLayers]) if (/^hwseg /.test(ml.name)) lm.removeManagedLayer(ml);
-    for (const spec of specs) lm.addManagedLayer(viewer.layerSpecification.getLayer(spec.name, spec));
-    if (rec) { const j = viewer.state.toJSON(), im = (j.layers || []).find((l) => l.type === 'image'); const ml = im && lm.getLayerByName(im.name);
-      if (ml && ml.layer && ml.layer.shaderControlState && /uicontrol float lo/.test(String(im.shader || ''))) ml.layer.shaderControlState.restoreState({ lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) }); }
+    setLayerList((cur) => { const out = cur.filter((l) => !/^hwseg /.test(l.name));
+      if (rec) { const im = out.find((l) => l.type === 'image'); if (im && /uicontrol float lo/.test(String(im.shader || ''))) im.shaderControls = { ...(im.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) }; }
+      return [...out, ...specs]; });
     return true;
-  } catch (e) { console.warn('layer API failed, falling back to restoreState:', e); return false; }
+  } catch (e) { console.warn('layer-list update failed, falling back to restoreState:', e); return false; }
 }
+// ---- Python bridge: Pyodide runs inside this page; `ng` (demo/py/ng_prelude.py) reads the current view and writes back layers
+const PYO = 'https://cdn.jsdelivr.net/pyodide/v314.0.8/full/';
+let pyP = null, pyCtx = null, pyCode = '', pyQ = Promise.resolve(), lastPyView = null;
+window.__hwNg.pendingPy = pyPending;
+function getPy() {
+  return pyP ||= (async () => {
+    say('python: loading Pyodide + numpy (first use, a few seconds)...');
+    await new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = PYO + 'pyodide.js'; sc.onload = res; sc.onerror = () => rej(new Error('could not load Pyodide from the CDN')); document.head.append(sc); });
+    const py = await window.loadPyodide({ indexURL: PYO }); await py.loadPackage('numpy');
+    py.setStdout({ batched: (t) => { window.__hwNg.pyOut = (window.__hwNg.pyOut || '') + t + '\n'; say('python: ' + t); } });
+    py.setStderr({ batched: (t) => { window.__hwNg.pyOut = (window.__hwNg.pyOut || '') + t + '\n'; } });
+    py.runPython(await (await fetch(HERE('py/ng_prelude.py'))).text());
+    say('python ready'); return py;
+  })();
+}
+async function pyRead(level, depth, margin) {
+  let view;
+  if (pyCtx && pyCtx.forced) view = pyCtx.forced;                                // regeneration: the saved view, not the live one
+  else {
+    const j = viewer.state.toJSON(), fov = await probeFov(), d = j.dimensions || {}, A = axisIdx(d), srcSpec = imageSource(j), src = await openSource(srcSpec), zarr = src.z, off = src.off, L0 = zarr.levels[0];
+    const gx = padRange([fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b).map((v) => v)), gy = padRange([fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b)), umPerPx = ((fov.br[A.x] - fov.tl[A.x]) * L0.sp[2]) / fov.w;
+    let lv = level == null ? 0 : Math.max(0, Math.min(zarr.top, Math.round(level)));
+    if (level == null) for (let l = 0; l <= zarr.top; l++) if (zarr.levels[l].sp[2] <= Math.abs(umPerPx) * 1.0) lv = l;
+    const mk = (l) => { const f = 2 ** l, L = zarr.levels[l];
+      return { f, L, box: [clamp(Math.floor((gy[0] - off[1]) / f), 0, L.shape[1] - 1), clamp(Math.ceil((gy[1] - off[1]) / f), 1, L.shape[1]), clamp(Math.floor((gx[0] - off[2]) / f), 0, L.shape[2] - 1), clamp(Math.ceil((gx[1] - off[2]) / f), 1, L.shape[2])] }; };
+    let m = mk(lv); const nzw = Math.max(1, Math.round(depth || 1));
+    while (nzw * (m.box[1] - m.box[0]) * (m.box[3] - m.box[2]) > 8e6 && lv < zarr.top) m = mk(++lv);       // keep the crop within memory
+    const zl = clamp(Math.round((fov.c[A.z] - off[0]) / m.f), 0, m.L.shape[0] - 1), zA = clamp(zl - (nzw >> 1), 0, Math.max(0, m.L.shape[0] - nzw)), zB = Math.min(m.L.shape[0], zA + nzw);
+    view = { level: lv, box: m.box, zA, zB, zl, src: srcSpec, umPerPx: Math.abs(umPerPx) };
+  }
+  const src = await openSource(view.src), L = src.z.levels[view.level], [y0, y1, x0, x1] = view.box;
+  say(`python: reading ${view.zB - view.zA} x ${y1 - y0} x ${x1 - x0} voxels at level ${view.level}...`);
+  const data = await src.z.crop(view.level, view.zA, view.zB, y0, y1, x0, x1);
+  if (!pyCtx || !pyCtx.forced) lastPyView = view;
+  return { data, shape: [view.zB - view.zA, y1 - y0, x1 - x0], level: view.level, spacing: [...L.sp], origin: [view.zA, y0, x0], plane: view.zl - view.zA, umPerPx: view.umPerPx ?? 0 };
+}
+function pyBlock(flat, shape, view) {
+  const [nz, h, w] = shape; return { x0: view.box[2], x1: view.box[2] + w, y0: view.box[0], y1: view.box[0] + h, z0: view.zA, z1: view.zA + nz, lab: new Uint32Array(flat) };   // copy: `flat` can be a view into Pyodide's memory, which is reused after the run
+}
+function addLayer(spec) { setLayerList((cur) => [...cur.filter((l) => l.name !== spec.name), spec]); }
+window.__hwPy = {
+  read: (level, depth, margin) => pyRead(level, depth == null ? 9 : depth, margin),
+  async segmentation(flat, shape, name) {
+    const view = pyCtx && pyCtx.forced ? pyCtx.forced : lastPyView; if (!view) throw new Error('call ng.read() first');
+    const block = pyBlock(flat, shape.toJs ? shape.toJs() : shape, view);
+    if (pyCtx && pyCtx.capture) { pyCtx.capture.push(block); return; }
+    { let nz = 0, mx = 0; for (const q of block.lab) { if (q) nz++; if (q > mx) mx = q; } say(`python: segmentation ${nz} labeled voxels, max id ${mx}, view ${JSON.stringify(view.box)} z ${view.zA}-${view.zB}`); }
+    const P = { kind: 'py', name, code: pyCode, view: { level: view.level, box: view.box, zA: view.zA, zB: view.zB, zl: view.zl, src: view.src, umPerPx: view.umPerPx } }, id = b64e(P);
+    pyApproved.add(id);                                                          // we ran this code ourselves
+    addLayer(segLayer('py: ' + name, putSeg(P, [block])));
+    say(`python: segmentation layer "py: ${name}" (${shape[0] ?? ''} planes)`);
+  },
+  async annotations(pts, rad, name) {
+    if (pyCtx && pyCtx.forced) return;                                           // annotations are not part of a regenerated volume
+    const view = lastPyView; if (!view) throw new Error('call ng.read() first');
+    const j = viewer.state.toJSON(), d = j.dimensions || {}, keys = Object.keys(d), pos = j.position || [], src = await openSource(view.src), L = src.z.levels[view.level], L0 = src.z.levels[0], f = 2 ** view.level;
+    const P = Array.from(pts), R = Array.from(rad), ann = [];
+    for (let i = 0; i < R.length; i++) {
+      const g = { z: (view.zA + P[3 * i] + 0.5) * f + src.off[0], y: (view.box[0] + P[3 * i + 1] + 0.5) * f + src.off[1], x: (view.box[2] + P[3 * i + 2] + 0.5) * f + src.off[2] };
+      const r = { z: Math.max(1, R[i] / L0.sp[0]), y: Math.max(1, R[i] / L0.sp[1]), x: Math.max(1, R[i] / L0.sp[2]) };
+      ann.push({ type: 'ellipsoid', id: 'p' + i, center: keys.map((kk, q) => (g[kk] !== undefined ? g[kk] : pos[q] || 0)), radii: keys.map((kk) => r[kk] || 1) });
+    }
+    addLayer({ type: 'annotation', name: 'py: ' + name, annotationColor: '#3cffb4', source: { url: 'local://annotations', transform: { outputDimensions: Object.fromEntries(keys.map((kk) => [kk, d[kk]])) } }, annotations: ann });
+    say(`python: ${ann.length} annotations "py: ${name}"`);
+  },
+};
+async function runPyCode(code, ctx) {                                            // one Python job at a time
+  const job = pyQ.then(async () => {
+    const py = await getPy(); await py.loadPackagesFromImports(code);
+    const prev = pyCtx; pyCtx = ctx || null; if (!ctx) { pyCode = code; window.__hwNg.pyOut = ''; }
+    try { const g = py.toPy({}); g.set('ng', py.pyimport('ng')); await py.runPythonAsync(code, { globals: g }); }
+    finally { pyCtx = prev; }
+  });
+  pyQ = job.catch(() => {}); return job;
+}
+async function computePy(P) {                                                    // regenerate a Python segmentation from its saved code + view
+  const capture = []; await runPyCode(P.code, { forced: P.view, capture });
+  if (!capture.length) throw new Error('the Python code produced no segmentation');
+  { let nz = 0, mx = 0; for (const q of capture[0].lab) { if (q) nz++; if (q > mx) mx = q; } say(`python: regenerated segmentation, ${nz} labeled voxels, max id ${mx}, view ${JSON.stringify(P.view.box)} z ${P.view.zA}-${P.view.zB}`); }
+  return { blocks: capture };
+}
+window.__hwNg.runPython = async (code) => { window.__hwNg.busy = true; try { await runPyCode(code, null); return { ok: true, out: window.__hwNg.pyOut || '' }; } catch (e) { return { ok: false, out: (window.__hwNg.pyOut || '') + String(e.message || e) }; } finally { window.__hwNg.busy = false; } };
+window.__hwNg.approvePy = async (id) => {                                        // the person reviewed the code in a link and allowed it
+  pyApproved.add(id); const i = pyPending.findIndex((p) => p.id === id); if (i >= 0) pyPending.splice(i, 1);
+  return window.__hwNg.regenSeg(id);
+};
+
 // ---- compute a segmentation from its parameters (also used to regenerate one from a shared link)
 async function computeSeg(P) {
+  if (P.kind === 'py') return computePy(P);
   for (let i = 0; i < 1800 && !window.__hwNg.ready; i++) await sleep(100);
   if (!engine) throw new Error('no WebGPU: segmentation unavailable');
   const src = await openSource(P.src), zarr = src.z, L = zarr.levels[P.level], adjust = (v) => adjustLogVol(v, P.rec.lo, P.rec.hi, { b: 0, c: 1, g: P.rec.gamma });
@@ -243,7 +354,7 @@ async function detectRegions(j, fov, zarr, off, d, umPerPx, sp0) {
   if (!applyHwLayers(specs, rec)) {
     const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name)).concat(specs);
     const img = k.layers.find((l) => l.type === 'image'); if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
-    k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy'; viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
+    k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy'; quietMouse(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
   }
   const tp = 100 * tis.reduce((a, b) => a + b, 0) / (w * h), wp = 100 * wm.reduce((a, b) => a + b, 0) / (w * h);
   say(`${layers[0][2].length} outline + ${layers[1][2].length} cortex/WM segments (tissue ${tp.toFixed(0)}%, white matter ${wp.toFixed(0)}%, level ${level}, ${umPerPx.toFixed(0)} um/px, FOV ${w}x${h} voxels)`);
@@ -256,7 +367,7 @@ async function detect() {
   const d = j.dimensions || {}, sp0 = { z: d.z && d.z[0], y: d.y && d.y[0], x: d.x && d.x[0] }; if (!sp0.x) throw new Error('state has no x/y/z dimensions');
   const src = await openSource(imageSource(j)), zarr = src.z, off = src.off, L0 = zarr.levels[0], A = axisIdx(d);
   const gx0_ = [fov.tl[A.x], fov.br[A.x]].sort((a, b) => a - b), gy0_ = [fov.tl[A.y], fov.br[A.y]].sort((a, b) => a - b), gx = padRange(gx0_), gy = padRange(gy0_), gz = fov.c[A.z];
-  if (!(gx[1] - gx[0] > 1 && gy[1] - gy[0] > 1)) throw new Error('show the x-y plane (displayDimensions x, y, z and layout xy)');
+  if (!(gx[1] - gx[0] > 1 && gy[1] - gy[0] > 1)) throw new Error(`show the x-y plane (displayDimensions x, y, z and layout xy) [dims ${Object.keys(d)} x ${gx} y ${gy} tl ${fov.tl} br ${fov.br}]`);
   // level-0 local voxel box of the FOV
   const lx = [gx[0] - off[2], gx[1] - off[2]], ly = [gy[0] - off[1], gy[1] - off[1]], lz = gz - off[0];
   const umPerPx = ((gx[1] - gx[0]) * L0.sp[2]) / fov.w;                       // physical size of a screen pixel
@@ -289,7 +400,7 @@ async function detect() {
   if (!applyHwLayers(specs, rec)) {
     const k = viewer.state.toJSON(); k.layers = (k.layers || []).filter((l) => !/^hwseg /.test(l.name)).concat(specs);
     const img = k.layers.find((l) => l.type === 'image'); if (img && /uicontrol float lo/.test(String(img.shader || ''))) img.shaderControls = { ...(img.shaderControls || {}), lo: +rec.lo.toFixed(2), hi: +rec.hi.toFixed(2), gamma: +rec.gamma.toFixed(2) };
-    k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy'; viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
+    k.displayDimensions = ['x', 'y', 'z']; k.layout = k.layout || 'xy'; quietMouse(); viewer.state.reset(); await sleep(60); viewer.state.restoreState(k);
   }
   say(`segmentation: ${isVessel ? 'vessel mask' : ann.length + ' cells'} over ${nz} planes (${m.model}, level ${m.level}, ${(umPerPx).toFixed(1)} um/px, exposure gamma ${rec.gamma.toFixed(2)})`);
   const boxG = [[box_[2] * f + off[2], box_[3] * f + off[2]], [box_[0] * f + off[1], box_[1] * f + off[1]]];
@@ -304,14 +415,14 @@ viewer.state.changed.add(() => {                                              //
   if (!$('hw-auto').checked || viewKey() === lastView) return; lastView = viewKey(); clearTimeout(timer); say('view changed: detecting after it settles...'); timer = setTimeout(run, 600);
 });
 window.__hwNg.run = run; window.__hwNg.runModel = (key) => { $('hw-m').value = key; return run(); };
-window.__hwNg.regenSeg = async () => {                                        // drop cached volumes and give every segmentation layer a fresh source so Neuroglancer refetches (and we recompute)
-  const j = viewer.state.toJSON(), stamp = Date.now().toString(36), lm = viewer.layerManager; let n = 0;
-  for (const id of Object.keys(segJobs)) delete segJobs[id]; for (const id of Object.keys(segMetaC)) delete segMetaC[id];
-  for (const l of j.layers || []) if (l.type === 'segmentation') { const u = typeof l.source === 'string' ? l.source : l.source && l.source.url;
-    if (u && /virtual\/seg\//.test(u)) { const spec = { ...l }, nu = u.replace(/(virtual\/seg\/[A-Za-z0-9_-]+)(\.[a-z0-9]+)?/, '$1.' + stamp); if (typeof l.source === 'string') spec.source = nu; else spec.source = { ...l.source, url: nu };
-      const old = lm.getLayerByName(l.name); if (old) lm.removeManagedLayer(old); lm.addManagedLayer(viewer.layerSpecification.getLayer(l.name, spec)); n++; } }
+window.__hwNg.regenSeg = async (only = null) => {                            // drop cached volumes and give segmentation layers a fresh source so Neuroglancer refetches (and we recompute)
+  const stamp = Date.now().toString(36); let n = 0;
+  for (const id of Object.keys(segJobs)) if (!only || id === only) delete segJobs[id]; for (const id of Object.keys(segMetaC)) if (!only || id === only) delete segMetaC[id];
+  setLayerList((cur) => { for (const l of cur) if (l.type === 'segmentation') { const u = typeof l.source === 'string' ? l.source : l.source && l.source.url;
+      if (u && /virtual\/seg\//.test(u) && (!only || u.includes(only))) { const nu = u.replace(/(virtual\/seg\/[A-Za-z0-9_-]+)(\.[a-z0-9]+)?/, '$1.' + stamp); if (typeof l.source === 'string') l.source = nu; else l.source = { ...l.source, url: nu }; n++; } } return cur; });
   say(n ? `regenerating ${n} segmentation layer(s) from their parameters...` : 'no segmentation layers in this view'); return n;
 };
+window.__hwNg.probe = probeFov;
 window.__hwNg.setSegAlpha = setSegAlpha; window.__hwNg.getSegAlpha = () => segAlpha;
 window.__hwNg.setDepth = (n) => { $('hw-nz').value = String(n); };
 window.__hwNg.setAuto = (on, key) => { if (key) $('hw-m').value = key; $('hw-auto').checked = !!on; if (on) run(); };

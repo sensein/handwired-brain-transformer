@@ -119,6 +119,36 @@ $('nglink').onchange = () => {
   banner.log(`link: ${ids.length} zarr source(s) -> ${a.stain} sample ${a.sample}`); open();
 };
 
+const PY_EXAMPLE = `import numpy as np
+from scipy import ndimage as ndi              # loaded on first import (a few seconds)
+
+v = await ng.read(depth=7)                    # log(I+1) under the current view: v.data[z, y, x]
+print(v)
+sig = 3.0 / np.mean(v.spacing_um)             # ~3 um smoothing, in voxels
+g = ndi.gaussian_filter(v.data, sig)
+bg = ndi.gaussian_filter(v.data, 4 * sig)
+mask = (g - bg) > 0.25                        # local-contrast threshold
+labels, n = ndi.label(mask)                   # one id per connected blob
+print(n, "blobs at level", v.level)
+await ng.segmentation(labels.astype(np.uint32), view=v, name="python blobs")
+cm = np.array(ndi.center_of_mass(mask, labels, range(1, n + 1)))
+if n: await ng.annotations(cm, view=v, radii_um=5, name="python centroids")
+`;
+try { $('pycode').value = localStorage.getItem('hw-py-code') || PY_EXAMPLE; } catch (e) { $('pycode').value = PY_EXAMPLE; }
+$('pycode').oninput = () => { try { localStorage.setItem('hw-py-code', $('pycode').value); } catch (e) { /* private mode */ } };
+$('pyrun').onclick = async () => {
+  const h = hook(); if (!h || !h.runPython) { $('pyout').textContent = 'the Neuroglancer view is not ready'; return; }
+  $('pyrun').disabled = true; $('pyout').textContent = 'running...'; const t = banner.start('other', 'Python on this view');
+  const r = await h.runPython($('pycode').value); $('pyout').textContent = r.out || (r.ok ? 'done' : 'failed'); banner.finish(t, r.ok, r.ok ? 'finished' : 'error'); $('pyrun').disabled = false;
+};
+let askedPy = new Set();
+setInterval(() => {                                                              // a link carrying Python code: show it and ask before anything runs
+  const h = hook(); if (!h || !h.pendingPy) return;
+  for (const p of [...h.pendingPy]) { if (askedPy.has(p.id)) continue; askedPy.add(p.id);
+    $('pypanel').open = true; $('pycode').value = p.code; $('pyout').textContent = `This link carries Python code for the layer "${p.name}". It has not been run. Read it above, then approve or ignore.`;
+    if (window.confirm(`This link contains Python code that builds the segmentation layer "${p.name}".\n\nIt would run in your browser (it can read the page and fetch from the network). Only run code you trust.\n\n${p.code.slice(0, 1200)}${p.code.length > 1200 ? '\n...' : ''}\n\nRun it?`)) h.approvePy(p.id); }
+}, 1500);
+
 // deep link: #s=<shared view>, ?stain=YO&sample=90  (or #id=<zarr id>)
 const q = new URLSearchParams(location.search), H = new URLSearchParams(location.hash.slice(1));
 let shared = null; try { if (H.get('s')) shared = JSON.parse(H.get('s')); } catch (e) { banner.log('could not read the shared view in the link', 'error'); }

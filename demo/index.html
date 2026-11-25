@@ -67,10 +67,16 @@
     <button id="fit">Fit whole slab</button>
     <button id="copy">Copy link to this view</button>
     <button id="regen" title="Recompute the segmentation layers from their stored parameters (they are held in memory, not uploaded)">Regenerate segmentations</button>
+    <details id="pypanel" style="margin-top:12px"><summary style="cursor:pointer;font-weight:600">Python on this view</summary>
+      <p class="note">Runs in your browser (Pyodide + numpy; scipy loads on import). <code>ng.read()</code> gives the image under the Neuroglancer view as numpy, <code>ng.segmentation()</code> / <code>ng.annotations()</code> write layers back. A segmentation layer keeps its code in the layer link; whoever opens the link is asked before it runs.</p>
+      <textarea id="pycode" spellcheck="false" rows="14" style="width:100%;font:12px/1.4 ui-monospace,monospace;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px"></textarea>
+      <button id="pyrun">Run Python on this view</button>
+      <pre id="pyout" style="font:11.5px/1.4 ui-monospace,monospace;white-space:pre-wrap;color:var(--muted);margin:6px 0 0;max-height:12em;overflow:auto"></pre>
+    </details>
     <dl id="info"></dl>
     <p class="legend note" id="legend"></p>
     <p class="note">Contrast, brightness and gamma are Neuroglancer's own layer controls (the shader panel on the right: lo / hi / contrast / brightness / gamma); the model's recommended window is applied after each run. Model results are segmentation layers (voxel labels computed in your browser and served to Neuroglancer from memory): cells get one id each, vessels class labels, tissue / white matter two classes. Cell centres and extents are a hidden annotation layer you can switch on.</p>
-    <p class="note"><a href="lab.html">Python lab</a> · <a href="viewer.html">2D viewer (legacy)</a> · <a href="https://github.com/sensein/handwired-brain-transformer">source</a></p>
+    <p class="note"><a href="https://github.com/sensein/handwired-brain-transformer">source</a></p>
   </aside>
   <main><iframe id="ng" title="Neuroglancer" allow="fullscreen"></iframe></main>
 </div>

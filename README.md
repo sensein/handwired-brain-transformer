@@ -93,12 +93,15 @@ axis, not a trained outcome: for vessels, direction count trades accuracy for si
 
 ## Python in the browser (Pyodide) and Neuroglancer
 
-* **Python lab** (`lab.html`): Pyodide (Python 3.14 in WebAssembly) imports the numpy-only `hwseg` modules
-  (`program.py`, `wiring.py`, `programs.py`, `exposure.py`, synced into `demo/py/` by `scripts/sync_browser_py.sh` and
-  checked by a test), runs your code to build a `Program`, and the weights execute on the WebGPU engine against a window
-  streamed from DANDI. Edit `kappa`, `tau0`, `sigma_um`, `scale`, swap in `vessels()`, or write the arrays yourself.
-  Measured: the default `cells` program built in 362 ms with the same 45 nonzero parameters as the torch-side export.
-  What Pyodide cannot do here: its package set has numpy, scipy, scikit-image, zarr, numcodecs, fsspec and aiohttp but no
+* **Python on the main page**: the sidebar's "Python on this view" panel runs Python (Pyodide, Python 3.14 in WebAssembly, numpy;
+  scipy loads on import) inside the Neuroglancer page. The `ng` module (`demo/py/ng_prelude.py`) reads the image under the current
+  view (`v = await ng.read(depth=9)` -> numpy `log(I+1)`, with level, voxel spacing and origin) and writes results back
+  (`await ng.segmentation(labels, view=v)`, `await ng.annotations(points, view=v)`). The default example smooths, thresholds
+  with a local contrast and labels blobs with `scipy.ndimage`, then adds the segmentation and the centroids. A Python segmentation
+  layer keeps its code and view parameters in the layer's source URL, so a shared link can regenerate it, but a link carrying code is
+  never run silently: the page shows the code and asks first. (The numpy-only `hwseg` modules are still synced into `demo/py/` by
+  `scripts/sync_browser_py.sh` and checked by a test, so `from hwseg.programs import cells` works in that Python.)
+  What Pyodide cannot do: its package set has numpy, scipy, scikit-image, zarr, numcodecs, fsspec and aiohttp but no
   torch, onnxruntime, tornado or neuroglancer, so the Python Neuroglancer server and the torch executor do not run there;
   inference stays on WebGPU.
 * **Neuroglancer**: the hosted standalone viewer exposes `window.viewer`; on a probe against it, the view state was
@@ -190,8 +193,7 @@ whole slab vs one strip, and the model; Neuroglancer's own shader panel gives lo
 one id per cell, class labels for vessels, gray / white matter for the region programs; the region programs label only the displayed plane)
 plus hidden annotation layers (cell centres / extents, tissue outline and cortex/white-matter contours). The whole slab is a *virtual
 precomputed volume* generated in the browser by our stitcher and served to Neuroglancer by a service worker (`sw.js`), so
-adjacent strips are cross-faded into one continuous volume. The old stand-alone 2D viewer remains at `viewer.html` (legacy;
-it documents the debounced FOV pipeline, depth keys and 3D renderer below); the slab gallery was removed.
+adjacent strips are cross-faded into one continuous volume. The earlier stand-alone 2D viewer, its 3D renderer and the slab gallery were removed; Neuroglancer's own panels, depth keys and volume rendering replace them.
 Cell and vessel detection in the Neuroglancer view is 3-D: the "Depth" selector (default 9 planes; 1 = the old single-plane mode) runs the
 model on a z slab (plus margin planes so objects cut by the slab edge keep their z extent), splits every plane into 2-D blobs and links blobs in adjacent planes into objects (a 3-D connected-component pass merged
 touching cells into tall ellipsoids and was dropped; a track also ends where its area dips below 60% of its peak and rises again),
@@ -208,34 +210,20 @@ Cortex / white-matter and layer programs are only routed at pyramid level >= 5 (
 distance from the pia and is not scale-invariant. Levels 0-2 need a field of view above ~10 mm, larger than a GPU buffer, so
 region programs are not tested there.
 
-* **Legacy viewer** (`viewer.html`): pick a slab, pan / zoom; models, scale and pyramid level follow the zoom.
-  * *Whole stitched slabs, not just strips*: a slab acquisition is 8–11 strips stacked along y (each ~7.4 mm tall, up to
+* **Stitching**: whole stitched slabs, not just strips: a slab acquisition is 8–11 strips stacked along y (each ~7.4 mm tall, up to
     127 mm long, ~0.8 mm overlap, z and x origins drifting by up to ~0.5 mm). The viewer stitches them from the physical
     translation stored in each zarr (what Neuroglancer does with a multi-source layer), blending overlaps with a feathered
     average; overlaps are cross-faded with a smoothstep; a strip that covers most of an earlier strip's region is a re-acquisition and is left out of the stitch
     (listed as "strip N only"). YO sample 90 opens as one 2259 × 18542 × 49819-voxel slab at overview zoom. You can also
     **paste a dashboard / Neuroglancer link**: every DANDI zarr source in it is mapped to the stitched slab.
-  * *Seams between strips*: visible horizontal banding remains in YO and NN. Measured (`scripts/seam_metric.py`, vertical-gradient
+*Seams between strips*: visible horizontal banding remains in YO and NN. Measured (`scripts/seam_metric.py`, vertical-gradient
     energy inside strip overlaps over elsewhere; 1.0 = invisible): a local correction of the smooth log-difference field inside each
     overlap (tapered to zero at the overlap's end, so strip interiors are untouched) moves LEC 1.59 -> 1.35 (1.22 when estimated
     at a costlier level), is neutral on NN (1.07 -> 1.09) and slightly worse on YO (1.67 -> 1.72), so it is an opt-in
     "correct strip seams" toggle. Tried and rejected: chained per-strip gain offsets (accumulate a ramp; detrended they vanish) and a
     common flat-field profile along the strip (worse on NN). The banding therefore is not a simple per-strip gain or vignette; its
     cause is not established. Neuroglancer's native multi-source layer has no seam handling at all.
-  * *Status banner* (top, expandable): current stage (open, tissue scan, streaming, exposure, inference with fetch vs run,
-    3D build, waiting for the view to settle), elapsed time, tile progress, chunks / MB streamed and a short log.
-  * *Depth like Neuroglancer*: Shift+wheel, PageUp/PageDown or arrow keys step through z (Shift: x10); a slab-thickness
-    option shows a max projection or mean over 1–31 planes.
-  * *Exposure*: brightness / contrast / gamma sliders on top of the model-recommended window and gamma (toggle "auto
-    exposure"); the models always see the adjusted display image.
-  * *Debounced segmentation*: raw pixels update immediately, but the models run only after the view settles (default
-    350 ms, adjustable; exposure sliders wait 250 ms longer), never while you drag, one serialized GPU job at a time,
-    and an in-flight run is cancelled when the view changes again. A manual mode ("Run segmentation now") is available.
-    Measured with Playwright (`demo/test/debounce_test.mjs`): 40 drag events started 0 runs and then 1; a 20-event wheel
-    burst gave 1 run; a 15-event slider burst gave 1 run after the longer settle.
-  * *3D*: a WebGL2 ray-marcher (MIP, composite with early termination, isosurface; rotate / zoom; threshold, gain,
-    quality) renders the current field of view and depth slab from an 8-bit 3D texture, optionally overlaying the
-    segmentation computed for the whole volume (WebGPU engine returns every plane of the slab).
+
 Zoom routing (µm per screen pixel `p`): `p ≥ 8.5` tissue (`fable_tissue`); `p < 8.5` cells (YO/NN/other stains) or vessels
 (LEC/CD31); layers only by explicit choice; the scale family and pyramid level are then chosen from `p` (`demo/route.js`).
 
