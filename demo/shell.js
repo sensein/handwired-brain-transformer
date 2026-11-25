@@ -33,14 +33,23 @@ const MODELS = [
   { key: 'fable_blobs_v2', label: 'Cells: nuclei / somata (hand-written v2)', stains: ['YO', 'NN'], note: 'ellipsoids on detected nuclei / somata (levels 0-1; zoom in to a few mm)' },
   { key: 'fable_vessels_v2', label: 'Vessels (hand-written v2)', stains: ['LEC', 'CD31'], note: 'ellipsoids on vessel segments (levels 0-1; LEC only)' },
   { key: 'regions', label: 'Tissue outline + cortex / white-matter boundary', stains: ['YO', 'NN'], note: 'yellow tissue outline, cyan cortex / white-matter boundary (whole slab or >= 10 mm views)' },
+  // Neurodesk reference models (github.com/neurodesk/webapps): trained networks / a classical detector, run with onnxruntime-web
+  // (no WebGPU needed); weights are fetched at run time from the Neurodesk asset store. Level 0, about 1-3 mm fields of view.
+  { key: 'nd_cellpose', label: 'Reference: Cellpose 3 nuclei (Neurodesk)', stains: ['YO', 'NN'], ref: true, diam: true, note: 'Cellpose nuclei, 2-D per plane, planes resampled so the declared diameter spans 17 px, linked across z; 26 MB weights (BSD-3; training data partly CC-BY-NC)' },
+  { key: 'nd_stardist', label: 'Reference: StarDist 2D fluorescence (Neurodesk)', stains: ['YO', 'NN'], ref: true, diam: true, note: 'StarDist 2D_versatile_fluo, 2-D per plane, resampled so the declared diameter spans 16 px, polygon NMS, linked across z; 6 MB weights (BSD-3)' },
+  { key: 'nd_cellfinder', label: 'Reference: cellfinder candidates (Neurodesk port)', stains: ['YO', 'NN'], ref: true, diam: true, note: 'cellfinder 1.10.1 classical 3-D detection (no weights; BSD-3): candidate centres drawn as spheres of the declared diameter' },
+  { key: 'nd_vesselboost', label: 'Reference: VesselBoost (Neurodesk, MRA-trained, experimental)', stains: ['LEC', 'CD31'], ref: true, diam: false, note: 'VesselBoost 3-D U-Net trained on MR angiography, 64^3 patches on a 64-plane slab; 26 MB weights, licence not stated (code MIT)' },
   { key: '', label: 'None (image only)', stains: null, note: '' },
 ];
+const DIAM = { YO: 10, NN: 16 };                                                  // declared nucleus / soma diameter (um) per stain for the reference models
 function fillModels() {
   const st = $('stain').value, ok = (m) => !m.stains || m.stains.includes(st); $('model').innerHTML = '';
   MODELS.forEach((m) => { const o = new Option(m.label + (ok(m) ? '' : ' (not for this stain)'), m.key); o.disabled = !ok(m); $('model').add(o); });
   $('model').value = (MODELS.find((m) => m.stains && m.stains.includes(st)) || MODELS[0]).key;
   if (!MODELS.find((m) => m.key === $('model').value && ok(m))) $('model').value = '';
+  $('diam').value = DIAM[st] || 10; showDiam();
 }
+const showDiam = () => { const m = MODELS.find((x) => x.key === $('model').value); $('diam').hidden = $('diamlab').hidden = !(m && m.diam); $('modelnote').textContent = m && m.ref ? m.note : ''; };
 const hook = () => { const f = $('ng'); try { return f && f.contentWindow && f.contentWindow.__hwNg; } catch (e) { return null; } };
 let current = null, polled = 0, wasBusy = false, runTask = null;
 
@@ -71,7 +80,7 @@ function updateInfo() {
   if (current) { rows.push(['Subject', $('sub').value]); rows.push(['Strips', `${current.ids.length}${current.dropped.length ? ` (+${current.dropped.length} re-acquired, left out)` : ''}`]); rows.push(['Voxel (level 0)', current.sp.map((x) => x.toFixed(2)).join(' x ') + ' um']); }
   try { const j = $('ng').contentWindow.viewer && $('ng').contentWindow.viewer.state.toJSON(), im = j && j.layers.find((l) => l.type === 'image'), sc = im && im.shaderControls;
     if (sc && sc.lo !== undefined) rows.push(['Window (model)', `log ${sc.lo}..${sc.hi}, gamma ${sc.gamma ?? 1}`]); } catch (e) { /* not ready */ }
-  if (h && h.last) rows.push(['Last run', h.last.regions ? `tissue ${h.last.tissuePct.toFixed(0)}%, white matter ${h.last.wmPct.toFixed(0)}% (level ${h.last.level})` : `${h.last.n} detections (${h.last.model}, level ${h.last.level})`]);
+  if (h && h.last) rows.push(['Last run', h.last.regions ? `tissue ${h.last.tissuePct.toFixed(0)}%, white matter ${h.last.wmPct.toFixed(0)}% (level ${h.last.level})` : `${h.last.n} detections (${h.last.model}, level ${h.last.level}${h.last.ref ? `, ${h.last.ref.seconds.toFixed(0)} s, ${Object.values(h.last.ref.ep).join('/')}` : ''})`]);
   $('info').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
 }
 
@@ -93,16 +102,17 @@ $('sample').onchange = () => { fillSessions(); open(); };
 $('session').onchange = () => { fillStrips(); open(); };
 $('mode').onchange = () => { $('strip').hidden = $('striplab').hidden = $('mode').value !== 'strip'; open(); };
 $('strip').onchange = () => open();
-$('model').onchange = () => { legend(); const h = hook(); if ($('auto').checked && h) h.setAuto(true, $('model').value); };
+$('diam').onchange = () => { const h = hook(); if (h && h.setDiam) h.setDiam($('diam').value); };
+$('model').onchange = () => { legend(); showDiam(); const h = hook(); if ($('auto').checked && h) h.setAuto(true, $('model').value); };
 $('segalpha').oninput = () => { $('segalpha-v').textContent = $('segalpha').value + '%'; const h = hook(); if (h && h.setSegAlpha) h.setSegAlpha($('segalpha').value / 100); };
 $('depth').onchange = () => { const h = hook(); if (h) h.setDepth($('depth').value); };
-$('run').onclick = () => { const h = hook(); if (h) { h.setDepth($('depth').value); if (h.setSegAlpha) h.setSegAlpha($('segalpha').value / 100); } if (h && $('model').value) h.runModel($('model').value); };
+$('run').onclick = () => { const h = hook(); if (h) { h.setDepth($('depth').value); if (h.setDiam) h.setDiam($('diam').value); if (h.setSegAlpha) h.setSegAlpha($('segalpha').value / 100); } if (h && $('model').value) h.runModel($('model').value); };
 $('auto').onchange = () => { const h = hook(); if (h) h.setAuto($('auto').checked && !!$('model').value, $('model').value); };
 $('fit').onclick = () => open();
 $('seams').onchange = () => open();
 // A link = this page + sidebar choices + the full Neuroglancer state (layers, view, shader, panel). Segmentation layers carry their
 // run parameters in the source URL, so opening the link regenerates them on demand; the (large) cell-centre annotation layer is left out.
-const uiState = () => ({ sub: $('sub').value, stain: $('stain').value, sample: $('sample').value, session: $('session').value, mode: $('mode').value, strip: $('strip').value, seams: $('seams').checked, alpha: $('segalpha').value, model: $('model').value, depth: $('depth').value, auto: $('auto').checked });
+const uiState = () => ({ sub: $('sub').value, stain: $('stain').value, sample: $('sample').value, session: $('session').value, mode: $('mode').value, strip: $('strip').value, seams: $('seams').checked, alpha: $('segalpha').value, model: $('model').value, depth: $('depth').value, diam: $('diam').value, auto: $('auto').checked });
 function shareUrl() {
   const v = $('ng').contentWindow.viewer; if (!v) throw new Error('viewer not ready');
   const ng = v.state.toJSON(); ng.layers = (ng.layers || []).filter((l) => !(l.type === 'annotation' && /^hwseg /.test(l.name)));
@@ -132,6 +142,6 @@ $('stain').value = start.stain; $('sub').value = start.sub; fillSamples(); $('sa
 if (ui.mode) { $('mode').value = ui.mode; $('strip').hidden = $('striplab').hidden = ui.mode !== 'strip'; }
 if (ui.strip && [...$('strip').options].some((o) => o.value === ui.strip)) $('strip').value = ui.strip;
 if (ui.seams !== undefined) $('seams').checked = !!ui.seams; if (ui.model !== undefined && [...$('model').options].some((o) => o.value === ui.model && !o.disabled)) $('model').value = ui.model;
-if (ui.alpha) { $('segalpha').value = ui.alpha; $('segalpha-v').textContent = ui.alpha + '%'; } if (ui.depth) $('depth').value = ui.depth; if (ui.auto) $('auto').checked = true; legend();
+if (ui.alpha) { $('segalpha').value = ui.alpha; $('segalpha-v').textContent = ui.alpha + '%'; } if (ui.depth) $('depth').value = ui.depth; if (ui.diam) $('diam').value = ui.diam; if (ui.auto) $('auto').checked = true; legend(); showDiam();
 window.__shell = { open, hook, shareUrl, get current() { return current; } };
 await open(shared && shared.ng ? shared.ng : null);
