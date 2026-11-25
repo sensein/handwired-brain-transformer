@@ -86,7 +86,7 @@ def main():
             ax[i + 1].imshow(rgb, aspect=sp[1] / sp[2]); ax[i + 1].set_title(SHORT[k], fontsize=8)
         for x in ax:
             x.add_patch(plt.Rectangle((M - .5, M - .5), C, C, fill=False, ec="w", lw=0.6, ls="--")); x.axis("off")
-        fig.tight_layout(); fig.savefig(f"{a.figs}/{name}.png", dpi=110); plt.close(fig)
+        fig.tight_layout(); fig.savefig(f"{a.figs}/{name}.png", dpi=72); plt.close(fig)
         if m["task"] == "cells":
             tol = 0.5 * m["diamUm"]; obs = {k: objects(lab, sp, sel) for k, lab in labs.items()}
             row = {"name": name, "stain": m["stain"], "diam": m["diamUm"], "tol": tol, "vol_mm3": vol_mm3, "n": {k: len(v) for k, v in obs.items()},

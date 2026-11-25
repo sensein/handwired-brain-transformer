@@ -62,8 +62,14 @@ async function getClipper() {
   return (clipP ||= (async () => { const src = await (await fetch(CLIPPER_URL)).text(), m = { exports: {} }; new Function('module', 'exports', src)(m, m.exports); SD.setClipper(m.exports); return m.exports; })());
 }
 async function sha256hex(buf) { const d = await crypto.subtle.digest('SHA-256', buf); return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join(''); }
-// The execution provider: globalThis.__hwNdEP = 'wasm' | 'webgpu' forces one; default WebGPU first, WASM if session creation fails.
-// 3-D convolutions (VesselBoost) run on WASM, as in the Neurodesk app.
+// The execution provider: globalThis.__hwNdEP = 'wasm' | 'webgpu' (or ?ndep= in the page URL) forces one; default WebGPU first and
+// WASM if session creation fails, except on a software WebGPU adapter (SwiftShader / llvmpipe / fallback adapter), where the
+// WebGPU provider was measured far slower than WASM (StarDist on 8 tiles: > 14 min vs 30 s). 3-D convolutions (VesselBoost) run on
+// WASM, as in the Neurodesk app.
+let softGpuP = null;
+const softGpu = () => (softGpuP ||= (async () => { try { const a = await navigator.gpu.requestAdapter(); if (!a) return true; const i = a.info || {};
+  return !!(i.isFallbackAdapter || a.isFallbackAdapter || /swiftshader|llvmpipe|lavapipe|software/i.test(`${i.vendor} ${i.architecture} ${i.description} ${i.device}`)); } catch (e) { return true; } })());
+let epReason = '';
 export async function getSession(key, say = () => {}) {
   if (sessions[key]) return sessions[key];
   return (sessions[key] = (async () => {
@@ -71,13 +77,16 @@ export async function getSession(key, say = () => {}) {
     const r = await fetch(M.url); if (!r.ok) throw new Error(`${key}: weights fetch failed (${r.status})`);
     const buf = await r.arrayBuffer(); if (M.bytes && buf.byteLength !== M.bytes) throw new Error(`${key}: expected ${M.bytes} bytes, got ${buf.byteLength}`);
     if (M.sha256) { const h = await sha256hex(buf); if (h !== M.sha256) throw new Error(`${key}: sha256 mismatch`); }
-    const force = globalThis.__hwNdEP, order = force ? [force] : (M.dims === 3 || !('gpu' in navigator) ? ['wasm'] : ['webgpu', 'wasm']);
+    const force = globalThis.__hwNdEP || (globalThis.location && new URLSearchParams(location.search).get('ndep'));
+    const soft = !force && M.dims !== 3 && 'gpu' in navigator ? await softGpu() : false;
+    epReason = force ? 'forced' : M.dims === 3 ? '3-D convolutions on WASM' : !('gpu' in navigator) ? 'no WebGPU' : soft ? 'software WebGPU adapter: WASM is faster' : 'WebGPU first';
+    const order = force ? [force] : (M.dims === 3 || !('gpu' in navigator) || soft ? ['wasm'] : ['webgpu', 'wasm']);
     let last = null;
     for (const ep of order) { try { const s = await ort.InferenceSession.create(buf, { executionProviders: [ep], graphOptimizationLevel: 'all' }); epUsed[key] = ep; say(`${key}: onnxruntime-web ${ORT_VERSION} on ${ep}`); return s; } catch (e) { last = e; } }
     throw new Error(`${key}: could not create an ONNX session (${last && last.message})`);
   })().catch((e) => { delete sessions[key]; throw e; }));
 }
-export const ndInfo = () => ({ ort: ORT_VERSION, ep: { ...epUsed }, threads: ortP ? (globalThis.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1) : null });
+export const ndInfo = () => ({ ort: ORT_VERSION, ep: { ...epUsed }, epReason, threads: ortP ? (globalThis.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1) : null });
 
 // ---- helpers
 const counts = (v) => { const o = new Float32Array(v.length); for (let i = 0; i < v.length; i++) o[i] = Math.expm1(v[i]); return o; };   // log(I+1) -> intensity
