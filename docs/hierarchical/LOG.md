@@ -25,3 +25,23 @@ looking at images / printed statistics; no optimizer, no labels.
   connected pieces, noise specks mostly gone; still fires on YO nuclear clusters (vessels program is meant for LEC).
 * front-end gate: LEC_56_L1 has Qhi - Qlo = 0.21 log units (top/bottom 2.5 % ratio 1.24) yet visible vessels -> flat gate
   lowered from 0.25 to 0.06.
+
+## 2026-11-24 regions, engines, evaluation
+* regions r1 (r1.png): tissue = brightest histogram valley of the FOV quantile function; correct outlines on YO_90/YO_117/
+  NN_86/NN_161 L5 and YO_90 L6; dim NN_161 L6 lobe called background; dim patches inside white matter -> holes.
+* within-tissue rank f (r2.png) shows the laminar contrast: NN cortex bright / WM dark; YO bright outer, dark inner cortex,
+  medium WM. Prototype cortex/WM (m1-m3.png): first version had no WM because stage pooling mixed out-of-slab planes ->
+  `zpool=False` (in-plane merging) and core voxels (tissue across +-60 um in z); bug min(dO,dI) fixed; r4.png: WM cores on
+  NN_161_L5_w0, YO_90_L5_w0, YO_117_L5_w2; NN_86_L5_w2 and L6 slabs: no WM (deep-tissue prototype missing).
+* scale sweep 1 (sweep.png): 8 mm windows inside tissue gave no background (dark sulci < 4 % of FOV missed) -> tail rule
+  for the valley test (dark-tail intervals with a log jump > 2x the bright-end spread). After: NN_161_B3 bg 3 %, NN_86_B3 7 %,
+  all-tissue L0/L1 windows still no false background.
+* engines: JS-CPU vs Python float64 worst 3.5e-4; WebGPU (SwiftShader) worst 4.6e-3 (steep ramp), no binary flips;
+  seg.js/route.js integration path (hier_seg_test.mjs): 0 flips.
+* robustness (robust.txt, quantised uint16 transforms of RAW intensity): cells / vessels IoU 1.00 (min >= 0.99) for gain
+  x0.25/x4, gamma 0.5/2, log-contrast 0.5/2, offset +200; FLAT/DARK/SAT 0 detected. regions (pre tail-rule): tissue >= 0.99,
+  cortex / wm mean 0.94 / 0.88, min 0.64 at gamma 2 and offset +200 (offset is monotone but not log-affine: the valley
+  test is only log-affine invariant); FLAT on YO_90_L5_w0 still 25 % tissue (log contrast x0.02 of a 6-log-unit window
+  leaves 10 % contrast > the 6 % flat gate).
+* cell sweep (same 0.6 mm FOV, levels 0-4): objects/mm2 YO_90 524/237/53/0/0, NN_161 669/218/34/0/0: NOT level-consistent;
+  finer cells are lost as the voxel grows and the prior switches them off at >= 20 um voxels.

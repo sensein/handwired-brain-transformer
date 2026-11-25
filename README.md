@@ -42,6 +42,26 @@ tissue and layers coarsen the level instead. Measured with Playwright (`demo/tes
 6 → 3 → 1.5 → 0.75 µm/px fetched 570×268 → 570×268 (level 1 → 0) → 286×134 → 144×68 voxels, and zooming out to the whole slab
 fetched 597×64 voxels at level 5 in one pass.
 
+## Hierarchical programs (`hier1`): raw input, one program for every zoom
+
+`docs/hierarchical/SPEC.md` (design, guarantees) and `docs/hierarchical/LOG.md` (iterations, measurements). This is a
+SegFormer-like 3D transformer with hand-set weights: 4-5 stages joined by stride-2 overlapped patch merging (Gaussian
+attention pooling in physical units), a Mix-FFN analogue (depthwise Gaussian-derivative / Hessian filter banks), spatial-
+reduction attention for mm-scale context at coarse stages, and a decode head that upsamples and fuses the stages by
+selecting the scale with the strongest response. Its input is raw `log(I+1)`: an in-model rank front end (global step-kernel
+attention) replaces the display window, gamma, exposure program, level routing and `_xN` variants, and the voxel size is an
+input token, so one weight file runs at every pyramid level. Files: `src/hwseg/hier.py` (format, geometry),
+`hier_model.py` (torch reference), `hier_programs.py` (`hier_cells`, `hier_vessels`), `hier_regions.py` (`hier_regions`:
+tissue, cortex / white matter, depth bands I-VI), `demo/hier.js` (JS CPU + WebGPU). Viewer families `hier_cells`,
+`hier_vessels`, `hier_regions` in `demo/route.js` (no level routing; the level is only the screen-resolution data choice).
+
+Guaranteed: the rank image is exactly invariant to any increasing intensity map, so cells / vessels are too while the
+view is readable (measured IoU 1.00 under quantised gain / gamma / contrast / offset changes); flat, dark and saturated
+views output nothing; the three executors agree (golden tests). Measured, not guaranteed: detection quality, cross-level
+consistency (cell counts per mm² drop with the voxel size; region maps agree between levels 2 and 5 on the same FOV),
+cortex / white matter (fragile on YO, needs a pial surface and deep tissue in view). Tests: `pytest`,
+`node demo/test/hier_cpu_test.mjs`, `demo/test/hier_gputest.mjs` and `hier_seg_test.mjs` (Playwright + SwiftShader).
+
 ## Programs
 
 | Program | Zoom band (µm per screen px) | What it computes | Nonzero params |

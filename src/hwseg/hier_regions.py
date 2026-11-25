@@ -61,21 +61,27 @@ def argmax_global(B: HB, vals, idx_vals, sharp=200.0):
 
 
 QP49 = tuple(round(0.02 * k, 2) for k in range(1, 50))
+QTAIL = (0.0025, 0.005, 0.01, 0.02, 0.03, 0.04)
+QLEV = QTAIL + tuple(p for p in QP49 if p >= 0.06)
 
 
-def tissue_front(B: HB, fe, c_nb=1.8, c_ref=2.5, sigma_t=25.0, beta=300.0):
+def tissue_front(B: HB, fe, c_nb=1.8, c_ref=2.5, c_jump=2.0, sigma_t=25.0, beta=300.0):
     """Tissue vs background from the FOV's own intensity distribution (in-context, no absolute level).
-    1. Q(p_k), p_k = 0.02 .. 0.98, from 49 global softmax heads over the valid voxels (I = 0 marks absent data: masked).
-    2. Inverse density D_k = (Q_{k+1} - Q_k) / 0.02 (log units per rank).
+    1. Q(p_k) at ranks p_k = 0.0025, 0.005, 0.01, 0.02, 0.03, 0.04, 0.06, 0.08, ..., 0.98 from global softmax heads over the
+       valid voxels (I = 0 marks absent data: masked).
+    2. Inverse density D_k = (Q_{k+1} - Q_k) / (p_{k+1} - p_k) (log units per rank).
     3. A histogram valley is an interval much sparser than both neighbourhoods and than the FOV average:
        W_k = min(D_k - c_nb (D_{k-2} + D_{k+2}) / 2, D_k - c_ref D_ref), D_ref = (Q_0.98 - Q_0.02) / 0.96.
-       (A Gaussian or any log-concave-like mode has convex D: never a valley.)
+       (A Gaussian or any log-concave-like mode has convex D: never a valley.) In the dark tail (p <= 0.06, small dark
+       structures such as a sulcus filling a few % of a zoomed view) there is no left neighbourhood; there the interval
+       must be sparser than its right neighbourhood AND the log-intensity jump must exceed c_jump times the spread of the
+       brightest 6 % of the FOV: W_k = min(D_k - c_nb D_{k+2}, (Q_{k+1} - Q_k) - c_jump (Q_0.98 - Q_0.92)).
     4. The tissue threshold is the brightest valley (dark modes below it: air, mounting medium, out-of-slab haze):
-       E_k = (1 + p_k) step(W_k), argmax by relu tournament; T = p_k + 0.01 (rank), bimodal = step(max E - 0.5);
+       E_k = (1 + p_k) step(W_k), argmax by relu tournament; T = interval midpoint (a rank), bimodal = step(max E - 0.5);
        no valley -> T = -0.1 (all tissue).
     W_k, E_k are ratios of log-intensity differences: exactly invariant to gain and power-law gamma; T is a rank.
     tissue = step(G_sigma_t(u) - T)."""
-    lv = QP49
+    lv = QLEV
     inv = B.ch(0)
     B.mlp(0, _ramp({S0_LOGI: -1.0}, 0.01, inv, 1000.0))
     Q = quantiles(B, fe["u"], lv, beta=beta, mask=inv)
@@ -83,18 +89,26 @@ def tissue_front(B: HB, fe, c_nb=1.8, c_ref=2.5, sigma_t=25.0, beta=300.0):
     D, units = [], []
     for k in range(nD):
         c = B.ch("g")
-        units += _lin({Q[k + 1]: 50.0, Q[k]: -50.0}, 0.0, c)
+        w = 1.0 / (lv[k + 1] - lv[k])
+        units += _lin({Q[k + 1]: w, Q[k]: -w}, 0.0, c)
         D.append(c)
     dref = B.ch("g")
-    units += _lin({Q[-1]: 1 / 0.96, Q[0]: -1 / 0.96}, 0.0, dref)
+    i02, i92, i98 = lv.index(0.02), lv.index(0.92), lv.index(0.98)
+    units += _lin({Q[i98]: 1 / 0.96, Q[i02]: -1 / 0.96}, 0.0, dref)
     B.mlp("g", units)
-    ks = list(range(2, nD - 2))
+    tail = [k for k in range(nD) if lv[k + 1] <= 0.06]
+    main = [k for k in range(2, nD - 2) if lv[k] >= 0.06]
+    ks = tail + main
     W = {k: B.ch("g") for k in ks}
-    # W_k = min(a, b) = a - relu(a - b); a = D_k - c_nb (D_{k-2} + D_{k+2}) / 2, b = D_k - c_ref D_ref
+    # W_k = min(a, b) = a - relu(a - b)
     units = []
     for k in ks:
-        a = {D[k]: 1.0, D[k - 2]: -c_nb / 2, D[k + 2]: -c_nb / 2}
-        b = {D[k]: 1.0, dref: -c_ref}
+        if k in tail:
+            a = {D[k]: 1.0, D[k + 2]: -c_nb}
+            b = {Q[k + 1]: 1.0, Q[k]: -1.0, Q[i98]: -c_jump, Q[i92]: c_jump}
+        else:
+            a = {D[k]: 1.0, D[k - 2]: -c_nb / 2, D[k + 2]: -c_nb / 2}
+            b = {D[k]: 1.0, dref: -c_ref}
         units += _lin(a, 0.0, W[k])
         amb = dict(a)
         for c_, v in b.items():
@@ -104,9 +118,9 @@ def tissue_front(B: HB, fe, c_nb=1.8, c_ref=2.5, sigma_t=25.0, beta=300.0):
     E = {k: B.ch("g") for k in ks}
     units = []
     for k in ks:
-        units += _ramp({W[k]: 1.0}, 0.0, E[k], 2.0, 1.0 + lv[k])    # (1 + p_k) * clamp(2 W_k): W in log/rank units (~10-50 at valleys)
+        units += _ramp({W[k]: 1.0}, 0.0, E[k], 2.0 if k in main else 20.0, 1.0 + lv[k])    # (1 + p_k) * clamp(g W_k)
     B.mlp("g", units)
-    emax, pidx = argmax_global(B, [E[k] for k in ks], [lv[k] + 0.01 for k in ks])
+    emax, pidx = argmax_global(B, [E[k] for k in ks], [(lv[k] + lv[k + 1]) / 2 for k in ks])
     bim, T = B.ch("g"), B.ch("g")
     B.mlp("g", _ramp({emax: 1.0}, -0.5, bim, 20.0))
     B.mlp("g", [({pidx: 1.0, bim: 1.0}, -1.0, {T: 1.0}), ({G_ONE: 0.1}, 0.0, {T: -1.0}), ({bim: 0.1}, 0.0, {T: 1.0})])

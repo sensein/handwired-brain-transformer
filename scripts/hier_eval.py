@@ -44,7 +44,10 @@ SETS = {"hier_cells": ["YO_90_L0_w0:12:36:0:192:0:192", "NN_161_L0_w0:12:36:0:19
 
 def robust(out):
     lines = []
+    import os
     for pname, keys in SETS.items():
+        if os.environ.get("ONLY") and pname != os.environ["ONLY"]:
+            continue
         prog = program(pname.replace("hier_", "") if pname != "hier_regions" else "regions")
         M = HierTransformer(prog, torch.float32)
         rows = {}
