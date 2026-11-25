@@ -278,7 +278,7 @@ export class HierGPU {
     }
     const gInit = new Float32Array(4096 + 4096); gInit[0] = Math.log2(sp0[2]); gInit[1] = 1;
     const gb = dev.createBuffer({ size: 4 * gInit.length, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST }); dev.queue.writeBuffer(gb, 0, gInit);
-    const dummyF = dev.createBuffer({ size: 16, usage: U.STORAGE }), dummyI = dev.createBuffer({ size: 16, usage: U.STORAGE }), trash = [];
+    const dummyF = dev.createBuffer({ size: 16, usage: U.STORAGE }), dummyB = dev.createBuffer({ size: 16, usage: U.STORAGE }), dummyI = dev.createBuffer({ size: 16, usage: U.STORAGE }), dummyW = dev.createBuffer({ size: 16, usage: U.STORAGE }), trash = [dummyB, dummyW];
     const mk = (arr) => { const b = dev.createBuffer({ size: Math.max(16, arr.byteLength), usage: U.STORAGE | U.COPY_DST }); dev.queue.writeBuffer(b, 0, arr); trash.push(b); return b; };
     const enc = dev.createCommandEncoder();
     const go = (name, a, b, w, iv, u, f, nThreads) => {
@@ -286,7 +286,7 @@ export class HierGPU {
       ui.set(u.slice(0, 12)); uf.set((f || []).slice(0, 4), 12);
       const ubuf = dev.createBuffer({ size: 64, usage: U.UNIFORM | U.COPY_DST }); dev.queue.writeBuffer(ubuf, 0, ub); trash.push(ubuf);
       const bg = dev.createBindGroup({ layout: this.bgl, entries: [{ binding: 0, resource: { buffer: ubuf } }, { binding: 1, resource: { buffer: a || dummyF } },
-        { binding: 2, resource: { buffer: b || dummyF } }, { binding: 3, resource: { buffer: w || dummyF } }, { binding: 4, resource: { buffer: iv || dummyI } }, { binding: 5, resource: { buffer: gb } }] });
+        { binding: 2, resource: { buffer: b || dummyB } }, { binding: 3, resource: { buffer: w || dummyW } }, { binding: 4, resource: { buffer: iv || dummyI } }, { binding: 5, resource: { buffer: gb } }] });
       const pass = enc.beginComputePass(); pass.setPipeline(this.pl[name]); pass.setBindGroup(0, bg);
       if (name === 'gmax' || name === 'gsum') pass.dispatchWorkgroups(256);
       else if (nThreads === 1) pass.dispatchWorkgroups(1);
